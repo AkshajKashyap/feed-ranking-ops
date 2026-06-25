@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "feed-ranking-ops"
+version = "0.1.0"
+description = "Two-stage personalized feed ranking system with temporal evaluation, retrieval, ranking, serving, and monitoring."
+requires-python = ">=3.11"
+dependencies = [
+"numpy",
+"pandas",
+"polars",
+"pyarrow",
+"duckdb",
+"scikit-learn",
+"pydantic",
+"pyyaml",
+]
+
+[project.optional-dependencies]
+dev = [
+"pytest",
+"ruff",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
