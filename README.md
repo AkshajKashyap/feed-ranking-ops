@@ -23,6 +23,16 @@ Milestone 2 adds offline logged-candidate ranking evaluation:
   TF-IDF content-similarity baselines.
 - Tune time-decay half-life on validation only, then refit and evaluate once on test.
 
+Milestone 3 adds exact full-catalog candidate retrieval:
+
+- Build retrieval queries from behavior histories and clicked impression targets.
+- Derive observed article availability from first candidate appearance timestamps.
+- Fit sparse TF-IDF article vectors under an inductive fitting protocol.
+- Build mean or recency-weighted history profiles.
+- Retrieve top-K articles exactly with cosine similarity from the eligible catalog.
+- Use popularity fallback for empty or unusable histories.
+- Select retrieval configuration on validation Recall@100 and evaluate once on test.
+
 This scope intentionally does not implement FAISS, approximate nearest-neighbor retrieval,
 two-tower neural models, LightGBM, APIs, Redis, streaming, Docker, dashboards, or monitoring.
 
@@ -101,6 +111,29 @@ python -m feed_ranking_ops.evaluation.run_baselines \
 make evaluate-baselines-smoke
 ```
 
+Run exact full-catalog retrieval on already processed data:
+
+```bash
+python -m feed_ranking_ops.retrieval.run_exact_retrieval \
+  --processed-dir data/processed \
+  --reports-dir reports/retrieval \
+  --catalog-protocol observed_available
+make evaluate-retrieval
+```
+
+Run a clearly labeled retrieval smoke evaluation:
+
+```bash
+python -m feed_ranking_ops.retrieval.run_exact_retrieval \
+  --processed-dir data/processed \
+  --reports-dir reports/retrieval_smoke \
+  --limit-queries 100 \
+  --text-configs title,title_abstract \
+  --history-lengths 10,all \
+  --decay-values 0.5
+make evaluate-retrieval-smoke
+```
+
 Generated Outputs
 -----------------
 
@@ -126,6 +159,17 @@ Baseline evaluation writes:
 - `reports/baselines/protocol.json`
 - `reports/baselines/validation_predictions.parquet`
 - `reports/baselines/test_predictions.parquet`
+
+Exact retrieval writes:
+
+- `reports/retrieval/validation_metrics.json`
+- `reports/retrieval/test_metrics.json`
+- `reports/retrieval/config_sweep.csv`
+- `reports/retrieval/model_comparison.md`
+- `reports/retrieval/protocol.json`
+- `reports/retrieval/availability_summary.json`
+- `reports/retrieval/validation_retrievals.parquet`
+- `reports/retrieval/test_retrievals.parquet`
 
 Processed data and generated reports are ignored by git by default.
 
@@ -236,6 +280,39 @@ See `docs/offline_evaluation_protocol.md` for details on chronological validatio
 impression-grouped metrics, exposure bias, and why logged-candidate evaluation differs from
 full-catalog retrieval.
 
+Full-Catalog Retrieval
+----------------------
+
+Milestone 3 starts from the user history and retrieves articles from an eligible catalog.
+The clicked candidates in the logged impression are retrieval targets, while the full
+original impression candidate list is used only for diagnostics.
+
+Because MIND does not provide reliable publication time in the processed schema, the default
+catalog uses observed availability: the first behavior timestamp where an article appears as
+an impression candidate. For a query, articles first observed after the query timestamp are
+excluded. Equal timestamps are allowed, so current-impression candidates can be eligible.
+
+Article representation uses sparse TF-IDF over title, title plus abstract, or title plus
+abstract plus category tokens. Validation vocabulary is fit on training-observed articles
+only. Final test vocabulary is refit on train plus validation references after validation
+selection. Evaluation labels are never used for fitting.
+
+User profiles average known history article vectors or apply recency-weighted positional
+decay. Unknown history IDs are skipped and counted. Empty histories, unknown-only histories,
+all-zero profiles, and empty eligible catalogs use popularity fallback based on allowed
+fitting-partition positive clicks.
+
+Retrieval metrics:
+
+- Recall@10, Recall@20, Recall@50, Recall@100
+- Hit Rate@10, Hit Rate@20, Hit Rate@50, Hit Rate@100
+- MRR@100
+- NDCG@10, NDCG@20, NDCG@100
+
+Reports include skipped query counts, clicked-target availability, catalog sizes, fallback
+usage, history coverage, unique recommendation coverage, exact scoring latency, and sparse
+matrix memory diagnostics. See `docs/full_catalog_retrieval_protocol.md`.
+
 Current Limitations
 -------------------
 
@@ -244,5 +321,6 @@ Current Limitations
 - Entity columns are preserved as raw JSON strings and are not featurized yet.
 - Candidate/news coverage gaps are measured and reported, not repaired.
 - Logged-candidate ranking does not measure full-catalog retrieval quality.
+- Exact full-catalog retrieval is a correctness reference and may not scale without ANN.
 - Offline clicks are implicit feedback and carry exposure bias.
-- No retrieval, embedding, API, cache, or monitoring components are implemented yet.
+- No approximate retrieval, neural embeddings, API, cache, or monitoring components are implemented yet.

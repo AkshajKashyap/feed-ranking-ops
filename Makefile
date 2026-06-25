@@ -1,4 +1,4 @@
-.PHONY: install validate-data audit-data prepare-data evaluate-baselines evaluate-baselines-smoke test lint check
+.PHONY: install validate-data audit-data prepare-data evaluate-baselines evaluate-baselines-smoke evaluate-retrieval evaluate-retrieval-smoke test lint check
 
 install:
 	python -m pip install -e ".[dev]"
@@ -17,6 +17,12 @@ evaluate-baselines:
 
 evaluate-baselines-smoke:
 	python -m feed_ranking_ops.evaluation.run_baselines --processed-dir data/processed --reports-dir reports/baselines_smoke --limit-impressions 100
+
+evaluate-retrieval:
+	python -m feed_ranking_ops.retrieval.run_exact_retrieval --processed-dir data/processed --reports-dir reports/retrieval
+
+evaluate-retrieval-smoke:
+	python -m feed_ranking_ops.retrieval.run_exact_retrieval --processed-dir data/processed --reports-dir reports/retrieval_smoke --limit-queries 100
 
 test:
 	pytest -q
