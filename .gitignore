@@ -11,8 +11,10 @@ data/raw/*
 data/interim/*
 data/processed/*
 artifacts/*
+reports/*
 
 !data/raw/.gitkeep
 !data/interim/.gitkeep
 !data/processed/.gitkeep
 !artifacts/.gitkeep
+!reports/.gitkeep
