@@ -33,8 +33,16 @@ Milestone 3 adds exact full-catalog candidate retrieval:
 - Use popularity fallback for empty or unusable histories.
 - Select retrieval configuration on validation Recall@100 and evaluate once on test.
 
-This scope intentionally does not implement FAISS, approximate nearest-neighbor retrieval,
-two-tower neural models, LightGBM, APIs, Redis, streaming, Docker, dashboards, or monitoring.
+Milestone 4 adds dense-vector and FAISS approximate retrieval benchmarking:
+
+- Project sparse TF-IDF article vectors into deterministic dense vectors with TruncatedSVD.
+- Evaluate dense exact inner-product retrieval as the correctness reference for FAISS.
+- Compare FAISS Flat IP and HNSW IP against dense exact retrieval.
+- Select SVD dimension and HNSW search parameters on validation-only ANN agreement.
+- Separate representation loss from ANN search loss in the generated reports.
+
+This scope intentionally does not implement two-tower neural models, LightGBM, APIs, Redis,
+streaming, Docker, dashboards, or monitoring.
 
 Expected Dataset Layout
 -----------------------
@@ -61,6 +69,15 @@ Install development dependencies:
 ```bash
 python -m pip install -e ".[dev]"
 ```
+
+Install optional FAISS support for ANN retrieval:
+
+```bash
+python -m pip install -e ".[dev,ann]"
+```
+
+Core imports and non-ANN tests do not require FAISS. The ANN command exits with a clear
+message if `faiss-cpu` is not installed.
 
 Validate the expected local file layout:
 
@@ -134,6 +151,29 @@ python -m feed_ranking_ops.retrieval.run_exact_retrieval \
 make evaluate-retrieval-smoke
 ```
 
+Benchmark dense-vector exact retrieval and FAISS ANN retrieval:
+
+```bash
+python -m feed_ranking_ops.retrieval.run_ann_benchmark \
+  --processed-dir data/processed \
+  --reports-dir reports/ann \
+  --catalog-protocol observed_available
+make evaluate-ann
+```
+
+Run a smaller FAISS smoke benchmark:
+
+```bash
+python -m feed_ranking_ops.retrieval.run_ann_benchmark \
+  --processed-dir data/processed \
+  --reports-dir reports/ann_smoke \
+  --limit-queries 100 \
+  --svd-dims 32,64 \
+  --ef-search 64 \
+  --oversampling 4
+make evaluate-ann-smoke
+```
+
 Generated Outputs
 -----------------
 
@@ -170,6 +210,23 @@ Exact retrieval writes:
 - `reports/retrieval/availability_summary.json`
 - `reports/retrieval/validation_retrievals.parquet`
 - `reports/retrieval/test_retrievals.parquet`
+
+ANN retrieval writes:
+
+- `reports/ann/validation_representation_metrics.json`
+- `reports/ann/validation_ann_metrics.json`
+- `reports/ann/test_representation_metrics.json`
+- `reports/ann/test_ann_metrics.json`
+- `reports/ann/config_sweep.csv`
+- `reports/ann/latency_benchmark.csv`
+- `reports/ann/model_comparison.md`
+- `reports/ann/protocol.json`
+- `reports/ann/runtime_environment.json`
+- `reports/ann/selected_configuration.json`
+- `reports/ann/index_metadata.json`
+- `reports/ann/validation_retrievals.parquet`
+- `reports/ann/test_retrievals.parquet`
+- `reports/ann/query_diagnostics.parquet`
 
 Processed data and generated reports are ignored by git by default.
 

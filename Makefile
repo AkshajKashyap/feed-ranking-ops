@@ -1,4 +1,4 @@
-.PHONY: install validate-data audit-data prepare-data evaluate-baselines evaluate-baselines-smoke evaluate-retrieval evaluate-retrieval-smoke test lint check
+.PHONY: install validate-data audit-data prepare-data evaluate-baselines evaluate-baselines-smoke evaluate-retrieval evaluate-retrieval-smoke evaluate-ann evaluate-ann-smoke test test-ann lint check
 
 install:
 	python -m pip install -e ".[dev]"
@@ -24,8 +24,17 @@ evaluate-retrieval:
 evaluate-retrieval-smoke:
 	python -m feed_ranking_ops.retrieval.run_exact_retrieval --processed-dir data/processed --reports-dir reports/retrieval_smoke --limit-queries 100
 
+evaluate-ann:
+	python -m feed_ranking_ops.retrieval.run_ann_benchmark --processed-dir data/processed --reports-dir reports/ann
+
+evaluate-ann-smoke:
+	python -m feed_ranking_ops.retrieval.run_ann_benchmark --processed-dir data/processed --reports-dir reports/ann_smoke --limit-queries 100 --svd-dims 32,64 --ef-search 64 --oversampling 4
+
 test:
 	pytest -q
+
+test-ann:
+	pytest -q tests/test_ann_retrieval.py tests/test_faiss_backend.py
 
 lint:
 	ruff check . --no-cache

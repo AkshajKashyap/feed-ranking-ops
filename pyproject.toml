@@ -23,6 +23,9 @@ dev = [
 "pytest",
 "ruff",
 ]
+ann = [
+"faiss-cpu>=1.8",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
