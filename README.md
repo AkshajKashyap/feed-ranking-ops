@@ -11,7 +11,8 @@ Milestone 1 builds the data foundation for Microsoft MIND-small:
 
 - Parse and validate `news.tsv` and `behaviors.tsv`.
 - Audit source data quality and coverage.
-- Prepare deterministic chronological train, validation, and offline test splits.
+- Prepare deterministic chronological splits using either official train/dev sources or an
+  explicit train-only internal holdout protocol.
 - Write inspectable Parquet outputs and split metadata.
 
 Milestone 2 adds offline logged-candidate ranking evaluation:
@@ -47,7 +48,7 @@ streaming, Docker, dashboards, or monitoring.
 Expected Dataset Layout
 -----------------------
 
-Download and extract MIND-small manually, then place the files under `data/raw`:
+The default `official_train_dev` protocol requires both official source directories:
 
 ```text
 data/raw/
@@ -58,6 +59,22 @@ data/raw/
     news.tsv
     behaviors.tsv
 ```
+
+When the official dev archive is unavailable, the opt-in `train_only_chronological` protocol
+requires only:
+
+```text
+data/raw/
+  MINDsmall_train/
+    news.tsv
+    behaviors.tsv
+```
+
+Train-only mode splits the official training behavior rows chronologically into 70% train,
+15% validation, and 15% internal test. That final partition is an internal chronological
+holdout, not the official MIND validation or test benchmark, and its metrics are not directly
+comparable to official MIND validation results. The pipeline never switches protocols based
+on which files happen to exist.
 
 The project does not download MIND during tests or normal commands.
 
@@ -82,25 +99,57 @@ message if `faiss-cpu` is not installed.
 Validate the expected local file layout:
 
 ```bash
-python -m feed_ranking_ops.data.validate_layout --data-dir data/raw
+python -m feed_ranking_ops.data.validate_layout \
+  --data-dir data/raw \
+  --protocol official_train_dev
 make validate-data
 ```
 
-Audit the dataset:
+Validate the train-only layout:
 
 ```bash
-python -m feed_ranking_ops.data.audit_dataset --data-dir data/raw --reports-dir reports
-make audit-data
+python -m feed_ranking_ops.data.validate_layout \
+  --data-dir data/raw \
+  --protocol train_only_chronological
+make validate-data-train-only
 ```
 
-Prepare chronological splits:
+Audit either source protocol:
+
+```bash
+python -m feed_ranking_ops.data.audit_dataset \
+  --data-dir data/raw \
+  --reports-dir reports \
+  --protocol official_train_dev
+make audit-data
+
+python -m feed_ranking_ops.data.audit_dataset \
+  --data-dir data/raw \
+  --reports-dir reports \
+  --protocol train_only_chronological
+make audit-data-train-only
+```
+
+Prepare official train/dev chronological splits:
 
 ```bash
 python -m feed_ranking_ops.data.prepare_dataset \
   --data-dir data/raw \
   --output-dir data/processed \
-  --reports-dir reports
+  --reports-dir reports \
+  --protocol official_train_dev
 make prepare-data
+```
+
+Prepare the train-only 70/15/15 split:
+
+```bash
+python -m feed_ranking_ops.data.prepare_dataset \
+  --data-dir data/raw \
+  --output-dir data/processed \
+  --reports-dir reports \
+  --protocol train_only_chronological
+make prepare-data-train-only
 ```
 
 Run local checks that do not require the real MIND dataset:
@@ -260,17 +309,30 @@ Chronological Splitting
 -----------------------
 
 Random splitting can leak future behavior patterns into validation examples for temporal
-recommendation systems. This project therefore:
+recommendation systems. This project provides two explicit protocols:
 
-- treats official MIND train behaviors as model-development data;
-- sorts official train behaviors by parsed timestamp;
-- assigns the first 80% to train and the remaining 20% to validation by default;
-- keeps official MIND dev behaviors as the offline test partition;
+- `official_train_dev` is the default. It assigns the first 80% of chronologically sorted
+  official train behaviors to train, the remaining 20% to validation, and official dev to
+  the final offline test partition.
+- `train_only_chronological` is opt-in. It assigns the first 70% of official train behavior
+  rows to train, the next 15% to validation, and the final 15% to an internal chronological
+  holdout written to `test_behaviors.parquet`.
+
+Both protocols:
+
+- sort by timestamp, source-row number, and impression ID;
+- use source-row order as the deterministic tie-break when a timestamp crosses a boundary;
 - never splits an individual impression row across partitions;
-- records timestamp ranges and integrity checks in `split_metadata.json`.
+- preserve source histories, candidate order, and labels;
+- use no random splitting;
+- record timestamp ranges and integrity checks in `split_metadata.json`.
 
 The pipeline reports the observed official dev timestamp range honestly. It does not assume
 the official dev period occurs after every official train event unless the local data verifies it.
+In train-only mode, metadata and reports explicitly label the final partition as
+`internal_chronological_holdout` and warn against treating it as an official MIND benchmark.
+
+See [`docs/data_split_protocols.md`](docs/data_split_protocols.md) for protocol details.
 
 Parquet Schema
 --------------

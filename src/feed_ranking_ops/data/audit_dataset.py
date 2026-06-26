@@ -7,7 +7,13 @@ from pathlib import Path
 from statistics import mean, median
 from typing import Any
 
-from feed_ranking_ops.data.layout import EXPECTED_MIND_FILES, require_valid_mind_layout
+from feed_ranking_ops.data.layout import (
+    DATA_PROTOCOLS,
+    DEFAULT_DATA_PROTOCOL,
+    EXPECTED_MIND_FILES,
+    DataProtocol,
+    require_valid_mind_layout,
+)
 from feed_ranking_ops.data.parsers import parse_behavior_file, parse_news_file
 from feed_ranking_ops.data.schemas import (
     BehaviorParseStats,
@@ -17,23 +23,35 @@ from feed_ranking_ops.data.schemas import (
 )
 
 
-def audit_dataset(data_dir: Path, reports_dir: Path) -> dict[str, Any]:
-    require_valid_mind_layout(data_dir)
+def audit_dataset(
+    data_dir: Path,
+    reports_dir: Path,
+    *,
+    protocol: DataProtocol = DEFAULT_DATA_PROTOCOL,
+) -> dict[str, Any]:
+    require_valid_mind_layout(data_dir, protocol)
 
     train_news, train_news_stats = parse_news_file(
         data_dir / EXPECTED_MIND_FILES["train_news"], "train"
     )
-    dev_news, dev_news_stats = parse_news_file(data_dir / EXPECTED_MIND_FILES["dev_news"], "dev")
     train_behaviors, train_behavior_stats = parse_behavior_file(
         data_dir / EXPECTED_MIND_FILES["train_behaviors"], "train", strict=False
     )
-    dev_behaviors, dev_behavior_stats = parse_behavior_file(
-        data_dir / EXPECTED_MIND_FILES["dev_behaviors"], "dev", strict=False
-    )
+    news_records = list(train_news)
+    news_stats = [train_news_stats]
+    behavior_stats = [train_behavior_stats]
 
-    news_records = [*train_news, *dev_news]
-    news_stats = [train_news_stats, dev_news_stats]
-    behavior_stats = [train_behavior_stats, dev_behavior_stats]
+    if protocol == "official_train_dev":
+        dev_news, dev_news_stats = parse_news_file(
+            data_dir / EXPECTED_MIND_FILES["dev_news"], "dev"
+        )
+        _, dev_behavior_stats = parse_behavior_file(
+            data_dir / EXPECTED_MIND_FILES["dev_behaviors"], "dev", strict=False
+        )
+        news_records.extend(dev_news)
+        news_stats.append(dev_news_stats)
+        behavior_stats.append(dev_behavior_stats)
+
     all_candidate_news_ids = [
         news_id for stats in behavior_stats for news_id in stats.candidate_news_ids
     ]
@@ -43,6 +61,17 @@ def audit_dataset(data_dir: Path, reports_dir: Path) -> dict[str, Any]:
     ]
 
     audit = {
+        "protocol": protocol,
+        "source_splits_used": ["train", "dev"] if protocol == "official_train_dev" else ["train"],
+        "official_dev_used": protocol == "official_train_dev",
+        "protocol_note": (
+            "Official train and dev source files were audited."
+            if protocol == "official_train_dev"
+            else (
+                "Only MINDsmall_train source files were audited. No official dev split "
+                "was used or fabricated."
+            )
+        ),
         "news": _build_news_audit(news_records, news_stats),
         "behaviors": _build_behavior_audit(behavior_stats, missing_candidate_ids),
         "parser_notes": {
@@ -75,6 +104,11 @@ def render_audit_markdown(audit: dict[str, Any]) -> str:
         "# MIND-small Data Audit",
         "",
         "This report summarizes the local MIND-small files. No dataset download is performed.",
+        "",
+        f"- Protocol: `{audit['protocol']}`",
+        f"- Source splits used: {', '.join(audit['source_splits_used'])}",
+        f"- Official dev used: {audit['official_dev_used']}",
+        f"- Protocol note: {audit['protocol_note']}",
         "",
         "## News",
         "",
@@ -281,13 +315,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Audit local MIND-small source files.")
     parser.add_argument("--data-dir", type=Path, default=Path("data/raw"))
     parser.add_argument("--reports-dir", type=Path, default=Path("reports"))
+    parser.add_argument(
+        "--protocol",
+        choices=DATA_PROTOCOLS,
+        default=DEFAULT_DATA_PROTOCOL,
+        help="Source layout protocol to audit.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        audit_dataset(args.data_dir, args.reports_dir)
+        audit_dataset(args.data_dir, args.reports_dir, protocol=args.protocol)
     except (MindDataError, FileNotFoundError) as exc:
         raise SystemExit(f"Audit failed: {exc}") from exc
 

@@ -1,4 +1,4 @@
-.PHONY: install validate-data audit-data prepare-data evaluate-baselines evaluate-baselines-smoke evaluate-retrieval evaluate-retrieval-smoke evaluate-ann evaluate-ann-smoke test test-ann lint check
+.PHONY: install validate-data validate-data-train-only audit-data audit-data-train-only prepare-data prepare-data-train-only evaluate-baselines evaluate-baselines-smoke evaluate-retrieval evaluate-retrieval-smoke evaluate-ann evaluate-ann-smoke test test-ann lint check
 
 install:
 	python -m pip install -e ".[dev]"
@@ -6,11 +6,20 @@ install:
 validate-data:
 	python -m feed_ranking_ops.data.validate_layout --data-dir data/raw
 
+validate-data-train-only:
+	python -m feed_ranking_ops.data.validate_layout --data-dir data/raw --protocol train_only_chronological
+
 audit-data:
 	python -m feed_ranking_ops.data.audit_dataset --data-dir data/raw --reports-dir reports
 
+audit-data-train-only:
+	python -m feed_ranking_ops.data.audit_dataset --data-dir data/raw --reports-dir reports --protocol train_only_chronological
+
 prepare-data:
 	python -m feed_ranking_ops.data.prepare_dataset --data-dir data/raw --output-dir data/processed --reports-dir reports
+
+prepare-data-train-only:
+	python -m feed_ranking_ops.data.prepare_dataset --data-dir data/raw --output-dir data/processed --reports-dir reports --protocol train_only_chronological
 
 evaluate-baselines:
 	python -m feed_ranking_ops.evaluation.run_baselines --processed-dir data/processed --reports-dir reports/baselines
