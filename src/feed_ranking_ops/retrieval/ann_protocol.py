@@ -5,7 +5,7 @@ import json
 import platform
 import sys
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from itertools import product
 from pathlib import Path
 from statistics import mean
@@ -1025,8 +1025,12 @@ def _runtime_environment() -> dict[str, Any]:
     else:
         faiss_version = getattr(faiss, "__version__", None)
     return {
-        "created_at": datetime.utcnow().isoformat() + "Z",
+        "created_at": _utc_timestamp(),
         "python": sys.version,
         "platform": platform.platform(),
         "faiss": faiss_version,
     }
+
+
+def _utc_timestamp() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")

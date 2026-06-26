@@ -1,7 +1,11 @@
+import csv
+import json
+import warnings
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
+import pyarrow.parquet as pq
 import pytest
 
 from feed_ranking_ops.data.prepare_dataset import prepare_dataset
@@ -11,7 +15,10 @@ from feed_ranking_ops.evaluation.processed import (
     NewsItem,
 )
 from feed_ranking_ops.retrieval.ann_metrics import agreement_metrics, representation_loss_metrics
-from feed_ranking_ops.retrieval.ann_protocol import render_ann_report, run_ann_benchmark
+from feed_ranking_ops.retrieval.ann_protocol import (
+    _runtime_environment,
+    render_ann_report,
+)
 from feed_ranking_ops.retrieval.availability import ArticleAvailability, derive_article_availability
 from feed_ranking_ops.retrieval.dense import (
     build_dense_user_profile,
@@ -21,10 +28,26 @@ from feed_ranking_ops.retrieval.dense import (
 from feed_ranking_ops.retrieval.dense_exact import dense_exact_rank
 from feed_ranking_ops.retrieval.faiss_backend import _post_filter_indices
 from feed_ranking_ops.retrieval.profiles import HistoryProfileConfig
-from feed_ranking_ops.retrieval.run_ann_benchmark import build_parser
+from feed_ranking_ops.retrieval.run_ann_benchmark import build_parser, main as ann_main
 from feed_ranking_ops.retrieval.text import TextConfig
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "mindsmall_demo"
+ANN_OUTPUTS = [
+    "validation_representation_metrics.json",
+    "validation_ann_metrics.json",
+    "test_representation_metrics.json",
+    "test_ann_metrics.json",
+    "config_sweep.csv",
+    "latency_benchmark.csv",
+    "model_comparison.md",
+    "protocol.json",
+    "runtime_environment.json",
+    "selected_configuration.json",
+    "index_metadata.json",
+    "validation_retrievals.parquet",
+    "test_retrievals.parquet",
+    "query_diagnostics.parquet",
+]
 
 
 def _news() -> dict[str, NewsItem]:
@@ -55,6 +78,54 @@ def _behavior(
             for index, (news_id, label) in enumerate(candidates)
         ],
     )
+
+
+def _prepare_ann_smoke_fixture(tmp_path: Path) -> Path:
+    processed_dir = tmp_path / "processed"
+    prepare_dataset(FIXTURE_DIR, processed_dir, tmp_path / "prepare_reports")
+    return processed_dir
+
+
+def _run_ann_smoke_cli(processed_dir: Path, reports_dir: Path) -> None:
+    exit_code = ann_main(
+        [
+            "--processed-dir",
+            str(processed_dir),
+            "--reports-dir",
+            str(reports_dir),
+            "--limit-queries",
+            "2",
+            "--svd-dims",
+            "2",
+            "--hnsw-m",
+            "4",
+            "--ef-construction",
+            "8",
+            "--ef-search",
+            "8",
+            "--oversampling",
+            "2",
+            "--top-k",
+            "10",
+            "--seed",
+            "42",
+            "--faiss-threads",
+            "1",
+        ]
+    )
+    assert exit_code == 0
+
+
+def _without_timing_values(value):
+    if isinstance(value, dict):
+        return {
+            key: _without_timing_values(item)
+            for key, item in value.items()
+            if key not in {"build_seconds", "efficiency"}
+        }
+    if isinstance(value, list):
+        return [_without_timing_values(item) for item in value]
+    return value
 
 
 def test_dense_svd_dimension_is_capped_and_vectors_are_normalized():
@@ -263,45 +334,67 @@ def test_ann_cli_parser_imports_and_parses_options():
     assert args.top_k == 20
 
 
-def test_ann_benchmark_workflow_writes_outputs_when_faiss_available(tmp_path: Path):
+def test_ann_smoke_workflow_writes_readable_outputs_when_faiss_available(tmp_path: Path):
     pytest.importorskip("faiss")
-    processed_dir = tmp_path / "processed"
-    prepare_dataset(FIXTURE_DIR, processed_dir, tmp_path / "prepare_reports")
+    processed_dir = _prepare_ann_smoke_fixture(tmp_path)
     reports_dir = tmp_path / "ann"
 
-    result = run_ann_benchmark(
-        processed_dir=processed_dir,
-        reports_dir=reports_dir,
-        svd_dims=[2],
-        hnsw_m_values=[4],
-        ef_construction_values=[8],
-        ef_search_values=[8],
-        oversampling_factors=[2],
-        top_k=10,
-        limit_queries=2,
-        seed=42,
-    )
+    _run_ann_smoke_cli(processed_dir, reports_dir)
 
-    expected = [
+    for filename in ANN_OUTPUTS:
+        assert (reports_dir / filename).is_file()
+    for path in reports_dir.glob("*.json"):
+        assert json.loads(path.read_text(encoding="utf-8"))
+    for path in reports_dir.glob("*.csv"):
+        with path.open(encoding="utf-8", newline="") as source:
+            assert list(csv.DictReader(source))
+    for path in reports_dir.glob("*.parquet"):
+        assert pq.read_table(path).num_rows > 0
+    assert "# Dense Vector and FAISS ANN Retrieval Benchmark" in (
+        reports_dir / "model_comparison.md"
+    ).read_text(encoding="utf-8")
+
+
+def test_ann_smoke_is_deterministic_when_faiss_available(tmp_path: Path):
+    pytest.importorskip("faiss")
+    processed_dir = _prepare_ann_smoke_fixture(tmp_path)
+    first_dir = tmp_path / "first"
+    second_dir = tmp_path / "second"
+
+    _run_ann_smoke_cli(processed_dir, first_dir)
+    _run_ann_smoke_cli(processed_dir, second_dir)
+
+    for filename in [
         "validation_representation_metrics.json",
         "validation_ann_metrics.json",
         "test_representation_metrics.json",
         "test_ann_metrics.json",
-        "config_sweep.csv",
-        "latency_benchmark.csv",
-        "model_comparison.md",
-        "protocol.json",
-        "runtime_environment.json",
         "selected_configuration.json",
-        "index_metadata.json",
-        "validation_retrievals.parquet",
-        "test_retrievals.parquet",
-        "query_diagnostics.parquet",
-    ]
-    for filename in expected:
-        assert (reports_dir / filename).is_file()
-    assert result["protocol"]["test_labels_used_for_selection"] is False
-    assert "configuration_name" in result["selected_configuration"]
+    ]:
+        first = json.loads((first_dir / filename).read_text(encoding="utf-8"))
+        second = json.loads((second_dir / filename).read_text(encoding="utf-8"))
+        assert _without_timing_values(first) == _without_timing_values(second)
+
+    for filename in ["validation_retrievals.parquet", "test_retrievals.parquet"]:
+        first = pq.read_table(first_dir / filename).select(
+            ["partition", "impression_id", "method", "retrieved_rank", "retrieved_news_id"]
+        )
+        second = pq.read_table(second_dir / filename).select(
+            ["partition", "impression_id", "method", "retrieved_rank", "retrieved_news_id"]
+        )
+        assert first.equals(second)
+
+
+def test_ann_runtime_timestamp_is_timezone_aware_utc_without_deprecation_warning():
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        timestamp = _runtime_environment()["created_at"]
+
+    parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    assert timestamp.endswith("Z")
+    assert parsed.tzinfo is not None
+    assert parsed.utcoffset() == timedelta(0)
+    assert not any(issubclass(item.category, DeprecationWarning) for item in caught)
 
 
 def test_faiss_dynamic_availability_uses_only_eligible_articles(tmp_path: Path):

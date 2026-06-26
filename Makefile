@@ -28,7 +28,30 @@ evaluate-ann:
 	python -m feed_ranking_ops.retrieval.run_ann_benchmark --processed-dir data/processed --reports-dir reports/ann
 
 evaluate-ann-smoke:
-	python -m feed_ranking_ops.retrieval.run_ann_benchmark --processed-dir data/processed --reports-dir reports/ann_smoke --limit-queries 100 --svd-dims 32,64 --ef-search 64 --oversampling 4
+	@set -eu; \
+	tmp_dir="$$(mktemp -d)"; \
+	trap 'rm -rf "$$tmp_dir"' EXIT; \
+	python -c "import faiss" 2>/dev/null || { \
+		echo "ANN smoke test requires FAISS. Install it with: python -m pip install -e \".[ann]\"" >&2; \
+		exit 1; \
+	}; \
+	python -m feed_ranking_ops.data.prepare_dataset \
+		--data-dir tests/fixtures/mindsmall_demo \
+		--output-dir "$$tmp_dir/processed" \
+		--reports-dir "$$tmp_dir/prepare_reports"; \
+	python -m feed_ranking_ops.retrieval.run_ann_benchmark \
+		--processed-dir "$$tmp_dir/processed" \
+		--reports-dir "$$tmp_dir/ann_reports" \
+		--limit-queries 2 \
+		--svd-dims 2 \
+		--hnsw-m 4 \
+		--ef-construction 8 \
+		--ef-search 8 \
+		--oversampling 2 \
+		--top-k 10 \
+		--seed 42 \
+		--faiss-threads 1; \
+	echo "Synthetic ANN smoke test passed; temporary metrics are not benchmark results."
 
 test:
 	pytest -q
