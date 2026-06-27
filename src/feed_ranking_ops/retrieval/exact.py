@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from time import perf_counter
+from typing import Callable
 
 import numpy as np
 
@@ -43,6 +43,13 @@ class RetrievalResult:
     latency_seconds: float
 
 
+@dataclass(frozen=True)
+class PreparedQueryRetrieval:
+    eligible_news_ids: list[str]
+    eligible_row_ids: np.ndarray
+    target_info: dict[str, object]
+
+
 def retrieve_for_query(
     query: RetrievalQuery,
     *,
@@ -55,25 +62,32 @@ def retrieve_for_query(
     static_catalog_ids: set[str] | None,
     top_k: int,
     exclude_history: bool,
+    prepared_query: PreparedQueryRetrieval | None = None,
 ) -> RetrievalResult:
     start = perf_counter()
-    target_info = target_availability(
-        query,
-        news=news,
-        availability=availability,
-        protocol=catalog_protocol,
-        static_catalog_ids=static_catalog_ids,
-    )
-    eligible = eligible_catalog(
-        query,
-        news=news,
-        availability=availability,
-        protocol=catalog_protocol,
-        static_catalog_ids=static_catalog_ids,
-    )
-    if exclude_history:
-        history = set(query.history_news_ids)
-        eligible = [news_id for news_id in eligible if news_id not in history]
+    if prepared_query is None:
+        target_info = target_availability(
+            query,
+            news=news,
+            availability=availability,
+            protocol=catalog_protocol,
+            static_catalog_ids=static_catalog_ids,
+        )
+        eligible = eligible_catalog(
+            query,
+            news=news,
+            availability=availability,
+            protocol=catalog_protocol,
+            static_catalog_ids=static_catalog_ids,
+        )
+        if exclude_history:
+            history = set(query.history_news_ids)
+            eligible = [news_id for news_id in eligible if news_id not in history]
+        eligible_row_ids = None
+    else:
+        target_info = prepared_query.target_info
+        eligible = prepared_query.eligible_news_ids
+        eligible_row_ids = prepared_query.eligible_row_ids
 
     profile = build_user_profile(query.history_news_ids, article_index, profile_config)
     fallback_reason = profile.fallback_reason
@@ -84,7 +98,7 @@ def retrieve_for_query(
         fallback_used = True
         fallback_reason = fallback_reason or "no_eligible_articles"
     elif fallback_used:
-        ranked_ids = fallback.rank(eligible, availability)
+        ranked_ids = fallback.rank(eligible, availability, top_k=top_k)
         score_by_id = {news_id: fallback.score(news_id) for news_id in ranked_ids}
     else:
         ranked_ids, score_by_id = _exact_cosine_rank(
@@ -92,16 +106,19 @@ def retrieve_for_query(
             article_index=article_index,
             availability=availability,
             profile=profile.vector,
+            eligible_row_ids=eligible_row_ids,
+            top_k=top_k,
         )
 
+    history = set(query.history_news_ids)
     retrieved = [
         RetrievedArticle(
             news_id=news_id,
             rank=rank,
             score=float(score_by_id[news_id]),
-            was_in_history=news_id in set(query.history_news_ids),
+            was_in_history=news_id in history,
         )
-        for rank, news_id in enumerate(ranked_ids[:top_k], start=1)
+        for rank, news_id in enumerate(ranked_ids, start=1)
     ]
     latency = perf_counter() - start
     return RetrievalResult(
@@ -126,50 +143,78 @@ def _exact_cosine_rank(
     article_index: ArticleTextIndex,
     availability: ArticleAvailability,
     profile,
+    eligible_row_ids: np.ndarray | None = None,
+    top_k: int | None = None,
 ) -> tuple[list[str], dict[str, float]]:
+    del availability
     if profile is None:
         raise ValueError("profile must not be None for exact cosine ranking")
-    row_ids = [
-        article_index.article_to_row[news_id]
-        for news_id in eligible_news_ids
-        if news_id in article_index.article_to_row
-    ]
-    filtered_ids = [
-        news_id for news_id in eligible_news_ids if news_id in article_index.article_to_row
-    ]
+    if eligible_row_ids is None:
+        filtered = [
+            (news_id, article_index.article_to_row[news_id])
+            for news_id in eligible_news_ids
+            if news_id in article_index.article_to_row
+        ]
+        filtered_ids = [news_id for news_id, _ in filtered]
+        row_ids = np.asarray([row_id for _, row_id in filtered], dtype=np.int64)
+    else:
+        filtered_ids = eligible_news_ids
+        row_ids = eligible_row_ids
     matrix = article_index.article_matrix[row_ids]
     profile_norm = float(np.sqrt(profile.multiply(profile).sum()))
     if matrix.shape[0] == 0 or profile_norm == 0.0:
         return [], {}
     raw_scores = matrix @ profile.T
     scores = np.asarray(raw_scores.toarray()).ravel() / profile_norm
+    selected_indices = _top_score_indices(scores, top_k)
+    ranked = [filtered_ids[index] for index in selected_indices]
     score_by_id = {
-        news_id: float(score) for news_id, score in zip(filtered_ids, scores, strict=True)
+        filtered_ids[index]: float(scores[index]) for index in selected_indices
     }
-    ranked = sorted(
-        filtered_ids,
-        key=lambda news_id: (
-            -score_by_id[news_id],
-            availability.first_candidate_timestamp.get(news_id, datetime.max),
-            news_id,
-        ),
-    )
     return ranked, score_by_id
+
+
+def _top_score_indices(scores: np.ndarray, top_k: int | None) -> list[int]:
+    # Eligible IDs arrive in availability/article-ID order, so source index is
+    # the deterministic secondary key for equal scores.
+    count = len(scores)
+    if top_k is None or top_k >= count:
+        selected = np.arange(count)
+    elif top_k <= 0:
+        return []
+    else:
+        partition = np.argpartition(scores, -top_k)[-top_k:]
+        threshold = float(scores[partition].min())
+        above = np.flatnonzero(scores > threshold)
+        tied = np.flatnonzero(scores == threshold)
+        selected = np.concatenate((above, tied[: top_k - len(above)]))
+    return sorted(
+        (int(index) for index in selected),
+        key=lambda index: (-float(scores[index]), index),
+    )
 
 
 def validate_retrieval_result(
     result: RetrievalResult,
     *,
-    eligible_news_ids: set[str],
+    eligible_news_ids: set[str] | None = None,
+    eligibility_check: Callable[[str], bool] | None = None,
     exclude_history: bool,
 ) -> None:
+    if eligible_news_ids is None and eligibility_check is None:
+        raise ValueError("eligible_news_ids or eligibility_check is required")
     seen: set[str] = set()
     expected_rank = 1
     for item in result.retrieved:
         if item.news_id in seen:
             raise ValueError("duplicate retrieved article within query")
         seen.add(item.news_id)
-        if item.news_id not in eligible_news_ids:
+        is_eligible = (
+            item.news_id in eligible_news_ids
+            if eligible_news_ids is not None
+            else eligibility_check is not None and eligibility_check(item.news_id)
+        )
+        if not is_eligible:
             raise ValueError("retrieved article is not in the eligible catalog")
         if item.rank != expected_rank:
             raise ValueError("retrieved ranks must be contiguous starting at 1")

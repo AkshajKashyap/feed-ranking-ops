@@ -4,24 +4,38 @@ import csv
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from statistics import mean
+from time import perf_counter
 from typing import Any
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from feed_ranking_ops.evaluation.processed import BehaviorImpression, ProcessedDataset, load_processed_dataset
 from feed_ranking_ops.retrieval.availability import (
+    ArticleAvailability,
+    CatalogEligibilityIndex,
     CatalogProtocol,
+    build_catalog_eligibility_index,
     derive_article_availability,
-    eligible_catalog,
     static_catalog_from_partitions,
 )
-from feed_ranking_ops.retrieval.exact import retrieve_for_query, validate_retrieval_result
+from feed_ranking_ops.retrieval.exact import (
+    PreparedQueryRetrieval,
+    retrieve_for_query,
+    validate_retrieval_result,
+)
 from feed_ranking_ops.retrieval.metrics import evaluate_retrieval_results, query_summary
-from feed_ranking_ops.retrieval.popularity import fit_popularity_fallback
+from feed_ranking_ops.retrieval.popularity import PopularityFallback, fit_popularity_fallback
 from feed_ranking_ops.retrieval.profiles import HistoryProfileConfig
-from feed_ranking_ops.retrieval.queries import behaviors_to_retrieval_queries
-from feed_ranking_ops.retrieval.text import TextConfig, fit_article_text_index, sparse_memory_bytes
+from feed_ranking_ops.retrieval.queries import RetrievalQuery, behaviors_to_retrieval_queries
+from feed_ranking_ops.retrieval.text import (
+    ArticleTextIndex,
+    TextConfig,
+    fit_article_text_index,
+    sparse_memory_bytes,
+)
 
 DEFAULT_TOP_K = 100
 DEFAULT_TEXT_CONFIGS = ["title", "title_abstract", "title_abstract_category"]
@@ -48,6 +62,13 @@ class RetrievalConfiguration:
         )
 
 
+@dataclass(frozen=True)
+class PreparedEvaluationQuery:
+    query: RetrievalQuery
+    retrieval: PreparedQueryRetrieval
+    history_news_ids: frozenset[str]
+
+
 def run_exact_retrieval_protocol(
     *,
     processed_dir: Path,
@@ -61,18 +82,29 @@ def run_exact_retrieval_protocol(
     exclude_history: bool = True,
     seed: int = 42,
 ) -> dict[str, Any]:
+    total_start = perf_counter()
     del seed
     if top_k <= 0:
         raise ValueError("top_k must be positive")
     if limit_queries is not None and limit_queries <= 0:
         raise ValueError("limit_queries must be positive when provided")
+
+    dataset_load_start = perf_counter()
     dataset = load_processed_dataset(processed_dir)
+    dataset_load_seconds = perf_counter() - dataset_load_start
+
+    availability_start = perf_counter()
     availability = derive_article_availability(dataset.behaviors)
+    availability_seconds = perf_counter() - availability_start
+
     train = _limit(dataset.behaviors["train"], limit_queries)
     validation = _limit(dataset.behaviors["validation"], limit_queries)
     test = _limit(dataset.behaviors["test"], limit_queries)
+
+    query_construction_start = perf_counter()
     validation_queries = behaviors_to_retrieval_queries(validation)
     test_queries = behaviors_to_retrieval_queries(test)
+    query_construction_seconds = perf_counter() - query_construction_start
     configurations = make_configuration_grid(
         text_configs=text_configs or DEFAULT_TEXT_CONFIGS,
         history_lengths=history_lengths or DEFAULT_HISTORY_LENGTHS,
@@ -80,32 +112,107 @@ def run_exact_retrieval_protocol(
         exclude_history=exclude_history,
     )
 
+    article_ids = sorted(dataset.news)
+    article_to_row = {news_id: index for index, news_id in enumerate(article_ids)}
+    validation_static_catalog = (
+        static_catalog_from_partitions([*train, *validation], dataset.news)
+        if catalog_protocol == "static_partition_catalog"
+        else None
+    )
+    validation_catalog_index = build_catalog_eligibility_index(
+        news=dataset.news,
+        availability=availability,
+        protocol=catalog_protocol,
+        static_catalog_ids=validation_static_catalog,
+    )
+    query_preparation_start = perf_counter()
+    prepared_validation_queries = _prepare_evaluation_queries(
+        validation_queries,
+        news_ids=set(dataset.news),
+        article_to_row=article_to_row,
+        catalog_index=validation_catalog_index,
+        exclude_history=exclude_history,
+    )
+    validation_query_preparation_seconds = perf_counter() - query_preparation_start
+
+    validation_fallback = fit_popularity_fallback(
+        train,
+        fitting_partitions=["train"],
+    )
+    validation_indexes: dict[str, ArticleTextIndex] = {}
+    validation_vectorization_seconds: dict[str, float] = {}
+    for text_config in dict.fromkeys(config.text_config for config in configurations):
+        vectorization_start = perf_counter()
+        validation_indexes[text_config] = fit_article_text_index(
+            news=dataset.news,
+            fitting_behaviors=train,
+            text_config=TextConfig(text_config),  # type: ignore[arg-type]
+        )
+        validation_vectorization_seconds[text_config] = perf_counter() - vectorization_start
+
     validation_runs = []
     for config in configurations:
         validation_runs.append(
             _evaluate_configuration(
                 config,
                 dataset=dataset,
-                fit_behaviors=train,
-                eval_behaviors=validation,
-                eval_queries=validation_queries,
+                article_index=validation_indexes[config.text_config],
+                fallback=validation_fallback,
+                prepared_queries=prepared_validation_queries,
                 fitting_partitions=["train"],
                 availability=availability,
-                catalog_protocol=catalog_protocol,
+                catalog_index=validation_catalog_index,
                 top_k=top_k,
+                article_vectorization_seconds=validation_vectorization_seconds[
+                    config.text_config
+                ],
             )
         )
     selected = select_configuration(validation_runs)
+
+    test_static_catalog = (
+        static_catalog_from_partitions([*train, *validation, *test], dataset.news)
+        if catalog_protocol == "static_partition_catalog"
+        else None
+    )
+    test_catalog_index = build_catalog_eligibility_index(
+        news=dataset.news,
+        availability=availability,
+        protocol=catalog_protocol,
+        static_catalog_ids=test_static_catalog,
+    )
+    query_preparation_start = perf_counter()
+    prepared_test_queries = _prepare_evaluation_queries(
+        test_queries,
+        news_ids=set(dataset.news),
+        article_to_row=article_to_row,
+        catalog_index=test_catalog_index,
+        exclude_history=exclude_history,
+    )
+    test_query_preparation_seconds = perf_counter() - query_preparation_start
+
+    test_vectorization_start = perf_counter()
+    test_article_index = fit_article_text_index(
+        news=dataset.news,
+        fitting_behaviors=[*train, *validation],
+        text_config=TextConfig(selected["configuration"].text_config),  # type: ignore[arg-type]
+    )
+    test_vectorization_seconds = perf_counter() - test_vectorization_start
+    test_fallback = fit_popularity_fallback(
+        [*train, *validation],
+        fitting_partitions=["train", "validation"],
+    )
     test_run = _evaluate_configuration(
         selected["configuration"],
         dataset=dataset,
-        fit_behaviors=[*train, *validation],
-        eval_behaviors=test,
-        eval_queries=test_queries,
+        article_index=test_article_index,
+        fallback=test_fallback,
+        prepared_queries=prepared_test_queries,
         fitting_partitions=["train", "validation"],
         availability=availability,
-        catalog_protocol=catalog_protocol,
+        catalog_index=test_catalog_index,
         top_k=top_k,
+        article_vectorization_seconds=test_vectorization_seconds,
     )
 
     reports_dir.mkdir(parents=True, exist_ok=True)
@@ -152,6 +259,42 @@ def run_exact_retrieval_protocol(
             "as an impression candidate. It is not true publication time."
         ),
     }
+    validation_scoring_seconds = sum(
+        run["timing"]["scoring_seconds"] for run in validation_runs
+    )
+    metric_evaluation_seconds = sum(
+        run["timing"]["metric_evaluation_seconds"] for run in validation_runs
+    ) + test_run["timing"]["metric_evaluation_seconds"]
+    article_vectorization_seconds = (
+        sum(validation_vectorization_seconds.values()) + test_vectorization_seconds
+    )
+    timing = {
+        "dataset_load_seconds": dataset_load_seconds,
+        "availability_construction_seconds": availability_seconds,
+        "query_construction_seconds": query_construction_seconds,
+        "query_eligibility_preparation_seconds": (
+            validation_query_preparation_seconds + test_query_preparation_seconds
+        ),
+        "article_vectorization_seconds": article_vectorization_seconds,
+        "validation_article_vectorization_by_text_seconds": validation_vectorization_seconds,
+        "test_article_vectorization_seconds": test_vectorization_seconds,
+        "scoring_seconds": validation_scoring_seconds + test_run["timing"]["scoring_seconds"],
+        "validation_scoring_seconds": validation_scoring_seconds,
+        "test_scoring_seconds": test_run["timing"]["scoring_seconds"],
+        "metric_evaluation_seconds": metric_evaluation_seconds,
+        "number_of_queries": len(validation_queries) + len(test_queries),
+        "validation_query_count": len(validation_queries),
+        "test_query_count": len(test_queries),
+        "validation_configuration_count": len(configurations),
+        "number_of_articles": len(dataset.news),
+        "average_eligible_articles_per_validation_query": _mean_eligible(
+            prepared_validation_queries
+        ),
+        "average_eligible_articles_per_test_query": _mean_eligible(prepared_test_queries),
+        "total_runtime_seconds": perf_counter() - total_start,
+    }
+    protocol["timing"] = timing
+
     _write_json(output_paths["validation_metrics"], selected["metrics_document"])
     _write_json(output_paths["test_metrics"], test_run["metrics_document"])
     _write_json(output_paths["protocol"], protocol)
@@ -159,6 +302,17 @@ def run_exact_retrieval_protocol(
     _write_config_sweep(output_paths["config_sweep"], validation_runs)
     _write_retrievals(selected["prediction_rows"], output_paths["validation_retrievals"])
     _write_retrievals(test_run["prediction_rows"], output_paths["test_retrievals"])
+    output_paths["report"].write_text(
+        render_retrieval_report(
+            selected["metrics_document"],
+            test_run["metrics_document"],
+            protocol,
+            availability_summary,
+        ),
+        encoding="utf-8",
+    )
+    timing["total_runtime_seconds"] = perf_counter() - total_start
+    _write_json(output_paths["protocol"], protocol)
     output_paths["report"].write_text(
         render_retrieval_report(
             selected["metrics_document"],
@@ -266,6 +420,7 @@ def render_retrieval_report(
         "",
         f"- Validation efficiency: `{validation_metrics['efficiency']}`",
         f"- Test efficiency: `{test_metrics['efficiency']}`",
+        f"- End-to-end timing: `{protocol['timing']}`",
         "",
         "## Limitations",
         "",
@@ -280,28 +435,15 @@ def _evaluate_configuration(
     config: RetrievalConfiguration,
     *,
     dataset: ProcessedDataset,
-    fit_behaviors: list[BehaviorImpression],
-    eval_behaviors: list[BehaviorImpression],
-    eval_queries,
+    article_index: ArticleTextIndex,
+    fallback: PopularityFallback,
+    prepared_queries: list[PreparedEvaluationQuery],
     fitting_partitions: list[str],
-    availability,
-    catalog_protocol: CatalogProtocol,
+    availability: ArticleAvailability,
+    catalog_index: CatalogEligibilityIndex,
     top_k: int,
+    article_vectorization_seconds: float,
 ) -> dict[str, Any]:
-    article_index = fit_article_text_index(
-        news=dataset.news,
-        fitting_behaviors=fit_behaviors,
-        text_config=TextConfig(config.text_config),
-    )
-    fallback = fit_popularity_fallback(
-        fit_behaviors,
-        fitting_partitions=fitting_partitions,
-    )
-    static_catalog = (
-        static_catalog_from_partitions([*fit_behaviors, *eval_behaviors], dataset.news)
-        if catalog_protocol == "static_partition_catalog"
-        else None
-    )
     profile_config = HistoryProfileConfig(
         profile_type=config.profile_type,  # type: ignore[arg-type]
         max_history_length=config.max_history_length,
@@ -310,7 +452,9 @@ def _evaluate_configuration(
     results = []
     prediction_rows = []
     query_rows = []
-    for query in eval_queries:
+    scoring_start = perf_counter()
+    for prepared in prepared_queries:
+        query = prepared.query
         result = retrieve_for_query(
             query,
             news=dataset.news,
@@ -318,31 +462,35 @@ def _evaluate_configuration(
             availability=availability,
             fallback=fallback,
             profile_config=profile_config,
-            catalog_protocol=catalog_protocol,
-            static_catalog_ids=static_catalog,
+            catalog_protocol=catalog_index.protocol,
+            static_catalog_ids=None,
             top_k=top_k,
             exclude_history=config.exclude_history,
+            prepared_query=prepared.retrieval,
         )
-        eligible = set(
-            eligible_catalog(
-                query,
-                news=dataset.news,
-                availability=availability,
-                protocol=catalog_protocol,
-                static_catalog_ids=static_catalog,
-            )
+        validate_retrieval_result(
+            result,
+            eligibility_check=lambda news_id, prepared=prepared: (
+                catalog_index.contains(news_id, prepared.query.timestamp)
+                and (
+                    not config.exclude_history
+                    or news_id not in prepared.history_news_ids
+                )
+            ),
+            exclude_history=config.exclude_history,
         )
-        if config.exclude_history:
-            eligible = eligible.difference(query.history_news_ids)
-        validate_retrieval_result(result, eligible_news_ids=eligible, exclude_history=config.exclude_history)
         results.append(result)
         prediction_rows.extend(_prediction_rows(result, config.name))
         query_rows.append(query_summary(result))
+    scoring_seconds = perf_counter() - scoring_start
+
+    metric_start = perf_counter()
     metrics = evaluate_retrieval_results(results, catalog_size_total=len(dataset.news))
+    metric_evaluation_seconds = perf_counter() - metric_start
     metrics_document = {
         "configuration": asdict(config),
         "configuration_name": config.name,
-        "catalog_protocol": catalog_protocol,
+        "catalog_protocol": catalog_index.protocol,
         "fit_metadata": {
             "fitting_partitions": list(fitting_partitions),
             "tfidf_fitting_article_count": len(article_index.fitting_article_ids),
@@ -352,6 +500,14 @@ def _evaluate_configuration(
                 article_index.article_matrix
             ),
         },
+        "timing": {
+            "shared_article_vectorization_seconds": article_vectorization_seconds,
+            "scoring_seconds": scoring_seconds,
+            "metric_evaluation_seconds": metric_evaluation_seconds,
+            "number_of_queries": len(prepared_queries),
+            "number_of_articles": len(dataset.news),
+            "average_eligible_articles_per_query": _mean_eligible(prepared_queries),
+        },
         "query_summaries": query_rows,
         **metrics,
     }
@@ -359,7 +515,79 @@ def _evaluate_configuration(
         "configuration": config,
         "metrics_document": metrics_document,
         "prediction_rows": prediction_rows,
+        "timing": metrics_document["timing"],
     }
+
+
+def _prepare_evaluation_queries(
+    queries: list[RetrievalQuery],
+    *,
+    news_ids: set[str],
+    article_to_row: dict[str, int],
+    catalog_index: CatalogEligibilityIndex,
+    exclude_history: bool,
+) -> list[PreparedEvaluationQuery]:
+    prepared_queries: list[PreparedEvaluationQuery] = []
+    for query in queries:
+        history = frozenset(query.history_news_ids)
+        eligible = catalog_index.eligible_ids(query.timestamp)
+        if exclude_history:
+            eligible = [news_id for news_id in eligible if news_id not in history]
+        target_info = _target_info(
+            query,
+            news_ids=news_ids,
+            catalog_index=catalog_index,
+        )
+        prepared_queries.append(
+            PreparedEvaluationQuery(
+                query=query,
+                retrieval=PreparedQueryRetrieval(
+                    eligible_news_ids=eligible,
+                    eligible_row_ids=np.fromiter(
+                        (article_to_row[news_id] for news_id in eligible),
+                        dtype=np.int64,
+                        count=len(eligible),
+                    ),
+                    target_info=target_info,
+                ),
+                history_news_ids=history,
+            )
+        )
+    return prepared_queries
+
+
+def _target_info(
+    query: RetrievalQuery,
+    *,
+    news_ids: set[str],
+    catalog_index: CatalogEligibilityIndex,
+) -> dict[str, object]:
+    targets_with_metadata = [
+        news_id for news_id in query.clicked_target_news_ids if news_id in news_ids
+    ]
+    available = [
+        news_id
+        for news_id in targets_with_metadata
+        if catalog_index.contains(news_id, query.timestamp)
+    ]
+    available_set = set(available)
+    return {
+        "targets_with_metadata": targets_with_metadata,
+        "available_targets": available,
+        "unavailable_targets": [
+            news_id for news_id in targets_with_metadata if news_id not in available_set
+        ],
+        "missing_metadata_count": len(query.clicked_target_news_ids)
+        - len(targets_with_metadata),
+    }
+
+
+def _mean_eligible(prepared_queries: list[PreparedEvaluationQuery]) -> float | None:
+    if not prepared_queries:
+        return None
+    return float(
+        mean(len(prepared.retrieval.eligible_news_ids) for prepared in prepared_queries)
+    )
 
 
 def _prediction_rows(result, configuration_name: str) -> list[dict[str, Any]]:

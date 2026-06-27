@@ -49,9 +49,9 @@ def fit_article_text_index(
         }
     )
     fitting_texts = [
-        build_article_text(news[news_id], text_config)
+        text
         for news_id in fitting_article_ids
-        if build_article_text(news[news_id], text_config).strip()
+        if (text := build_article_text(news[news_id], text_config)).strip()
     ]
     if not fitting_texts:
         matrix = sparse.csr_matrix((len(article_ids), 0), dtype=float)

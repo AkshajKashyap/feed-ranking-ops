@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
@@ -20,15 +21,19 @@ class PopularityFallback:
         self,
         eligible_news_ids: list[str],
         availability: ArticleAvailability,
+        *,
+        top_k: int | None = None,
     ) -> list[str]:
-        return sorted(
-            eligible_news_ids,
-            key=lambda news_id: (
+        def key(news_id: str) -> tuple[float, datetime, str]:
+            return (
                 -self.score(news_id),
                 availability.first_candidate_timestamp.get(news_id, datetime.max),
                 news_id,
-            ),
-        )
+            )
+
+        if top_k is not None and top_k < len(eligible_news_ids):
+            return heapq.nsmallest(top_k, eligible_news_ids, key=key)
+        return sorted(eligible_news_ids, key=key)
 
     def metadata(self) -> dict[str, object]:
         return {

@@ -430,7 +430,10 @@ Retrieval metrics:
 
 Reports include skipped query counts, clicked-target availability, catalog sizes, fallback
 usage, history coverage, unique recommendation coverage, exact scoring latency, and sparse
-matrix memory diagnostics. See `docs/full_catalog_retrieval_protocol.md`.
+matrix memory diagnostics. TF-IDF indexes and leakage-aware per-query eligibility are reused
+across validation configurations, and deterministic partial top-K selection avoids sorting
+the complete catalog. Protocol JSON includes end-to-end stage timings. See
+`docs/full_catalog_retrieval_protocol.md`.
 
 Current Limitations
 -------------------

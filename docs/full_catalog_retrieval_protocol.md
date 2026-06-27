@@ -61,7 +61,7 @@ to popularity.
 
 For each query:
 
-1. build the eligible catalog;
+1. read the precomputed eligible catalog boundary;
 2. optionally remove history articles;
 3. build the user vector;
 4. score all eligible article vectors exactly with cosine similarity;
@@ -75,6 +75,22 @@ Tie-breaking is deterministic:
 
 Exact retrieval is a correctness reference before approximate nearest-neighbor search. It
 may not scale to a large catalog.
+
+## Exact Retrieval Performance
+
+The implementation keeps the protocol exact while avoiding repeated work:
+
+- each TF-IDF article matrix is fit once per text configuration and fitting partition;
+- article vectors remain normalized and are reused across history-profile configurations;
+- articles are indexed once by first observed candidate timestamp;
+- each query's leakage-aware eligible article IDs and matrix row IDs are prepared once and
+  reused throughout the validation configuration sweep;
+- exact cosine scores are still computed for every eligible article, but deterministic
+  partial top-K selection avoids fully sorting the catalog.
+
+The validation and test JSON reports include vectorization, query preparation, scoring,
+metric evaluation, article count, query count, eligible-catalog size, and total runtime
+timings. These timings make expensive runs diagnosable without changing metrics or selection.
 
 ## Popularity Fallback
 
@@ -94,4 +110,3 @@ coverage, unique recommendation coverage, and exact-retrieval latency diagnostic
 Offline retrieval recall does not prove online engagement improvement. It is affected by
 logged exposure bias and by the fact that clicked targets come from an existing system's
 shown candidates.
-
