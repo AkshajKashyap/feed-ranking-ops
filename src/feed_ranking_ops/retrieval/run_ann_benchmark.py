@@ -43,6 +43,45 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--faiss-threads", type=int, default=None)
     parser.add_argument("--save-index", action="store_true")
     parser.add_argument("--load-index", type=Path, default=None)
+    parser.add_argument(
+        "--ann-only",
+        action="store_true",
+        help="Skip sparse/dense exact references and evaluate one FAISS representation.",
+    )
+    parser.add_argument(
+        "--single-config",
+        action="store_true",
+        help="Use only the first value from each configuration grid.",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=["flat", "hnsw"],
+        default="flat",
+        help="FAISS backend used by ANN-only mode.",
+    )
+    parser.add_argument(
+        "--text-config",
+        choices=["title", "title_abstract", "title_abstract_category"],
+        default="title",
+        help="Article text representation used by ANN-only mode.",
+    )
+    parser.add_argument(
+        "--profile-method",
+        choices=["mean", "recency"],
+        default="mean",
+        help="Dense history profile used by ANN-only mode.",
+    )
+    parser.add_argument(
+        "--history-mode",
+        default="full",
+        help="ANN-only history length: full or a positive integer.",
+    )
+    parser.add_argument(
+        "--profile-decay",
+        type=float,
+        default=0.5,
+        help="Recency decay used when --profile-method=recency.",
+    )
     return parser
 
 
@@ -64,6 +103,15 @@ def main(argv: list[str] | None = None) -> int:
             faiss_threads=args.faiss_threads,
             save_index=args.save_index,
             load_index=args.load_index,
+            ann_only=args.ann_only,
+            single_config=args.single_config,
+            backend=args.backend,
+            text_config=args.text_config,
+            profile_method=args.profile_method,
+            max_history_length=_parse_history_mode(args.history_mode),
+            profile_decay=(
+                args.profile_decay if args.profile_method == "recency" else None
+            ),
         )
     except FaissUnavailableError as exc:
         raise SystemExit(f"ANN benchmark failed: {exc}") from exc
@@ -75,6 +123,8 @@ def main(argv: list[str] | None = None) -> int:
         "Selected configuration: "
         f"{result['selected_configuration']['configuration_name']}"
     )
+    if result["protocol"].get("dense_exact_comparison_skipped"):
+        print("Dense exact comparison: skipped; ANN approximation recall is unavailable.")
     for name, path in result["outputs"].items():
         print(f"Wrote {name}: {path}")
     return 0
@@ -90,6 +140,18 @@ def _parse_ints(value: str, option_name: str) -> list[int]:
     if any(parsed <= 0 for parsed in values):
         raise ValueError(f"{option_name} values must be positive")
     return values
+
+
+def _parse_history_mode(value: str) -> int | None:
+    if value.strip().lower() == "full":
+        return None
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError("--history-mode must be full or a positive integer") from exc
+    if parsed <= 0:
+        raise ValueError("--history-mode must be full or a positive integer")
+    return parsed
 
 
 if __name__ == "__main__":

@@ -69,6 +69,35 @@ secondary tie-breakers.
 The final test run refits dense representations on train plus validation and evaluates the
 selected configuration once on test.
 
+## Fast ANN-Only Smoke Mode
+
+The full comparison deliberately computes sparse exact, dense exact, FAISS Flat, and FAISS
+HNSW outputs. That is useful for representation and approximation studies, but unnecessarily
+expensive when the goal is to verify one real-data FAISS configuration.
+
+`--ann-only --single-config` runs one explicit dense representation through one FAISS backend:
+
+- validation representation is fit on train and evaluated on validation;
+- the final representation is refit on train plus validation and evaluated on the internal test;
+- sparse exact and dense exact reference retrieval are skipped;
+- no ANN approximation recall or exact-agreement metric is claimed;
+- clicked-target retrieval metrics, retrieval rows, diagnostics, and leakage-aware availability
+  remain available.
+
+ANN-only defaults favor a quick smoke run:
+
+- `--backend flat`
+- `--text-config title`
+- `--profile-method mean`
+- `--history-mode full`
+
+Use `--backend hnsw` to smoke-test HNSW instead. The full benchmark remains the default when
+`--ann-only` is absent.
+
+Stage timing in `protocol.json` covers processed-data loading, availability construction,
+TF-IDF vectorization, SVD fitting/projection, FAISS index construction, FAISS search, metrics,
+total runtime, query/article counts, average eligible catalog sizes, and peak process memory.
+
 ## Outputs
 
 The benchmark writes JSON summaries, CSV sweeps, Parquet retrievals, query diagnostics,
@@ -98,6 +127,24 @@ python -m feed_ranking_ops.retrieval.run_ann_benchmark \
   --ef-search 64 \
   --oversampling 4
 ```
+
+Fast real-data ANN-only smoke:
+
+```bash
+python -m feed_ranking_ops.retrieval.run_ann_benchmark \
+  --processed-dir data/processed \
+  --reports-dir reports/ann_smoke_fast \
+  --limit-queries 100 \
+  --top-k 100 \
+  --svd-dims 64 \
+  --faiss-threads 4 \
+  --ann-only \
+  --single-config
+```
+
+This writes `validation_metrics.json`, `test_metrics.json`, `protocol.json`, and
+`model_comparison.md` alongside the existing retrieval, diagnostic, latency, index metadata,
+and configuration files.
 
 Use:
 

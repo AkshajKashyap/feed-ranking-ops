@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import asdict, dataclass
+from time import perf_counter
 from typing import Any
 
 import numpy as np
@@ -31,6 +32,7 @@ class DenseArticleIndex:
     fitting_partitions: list[str]
     tfidf_index: ArticleTextIndex
     svd: TruncatedSVD | None
+    build_timing: dict[str, float]
 
     @property
     def requested_dimension(self) -> int:
@@ -77,19 +79,26 @@ def fit_dense_article_index(
     seed: int,
     fitting_partitions: list[str],
 ) -> DenseArticleIndex:
+    total_start = perf_counter()
     if requested_dimension <= 0:
         raise ValueError("requested_dimension must be positive")
+    tfidf_start = perf_counter()
     tfidf_index = fit_article_text_index(
         news=news,
         fitting_behaviors=fitting_behaviors,
         text_config=text_config,
     )
+    tfidf_seconds = perf_counter() - tfidf_start
+    projection_start = perf_counter()
     dense, svd, effective_dimension = _project_tfidf_to_dense(
         tfidf_index,
         requested_dimension=requested_dimension,
         seed=seed,
     )
+    svd_projection_seconds = perf_counter() - projection_start
+    normalization_start = perf_counter()
     dense, zero_mask = l2_normalize_rows(dense)
+    normalization_seconds = perf_counter() - normalization_start
     zero_ids = [
         article_id
         for article_id, is_zero in zip(tfidf_index.article_ids, zero_mask, strict=True)
@@ -110,6 +119,12 @@ def fit_dense_article_index(
         fitting_partitions=list(fitting_partitions),
         tfidf_index=tfidf_index,
         svd=svd,
+        build_timing={
+            "tfidf_vectorization_seconds": tfidf_seconds,
+            "svd_fit_projection_seconds": svd_projection_seconds,
+            "normalization_seconds": normalization_seconds,
+            "total_dense_representation_seconds": perf_counter() - total_start,
+        },
     )
 
 

@@ -223,6 +223,25 @@ python -m feed_ranking_ops.retrieval.run_ann_benchmark \
 make evaluate-ann-smoke
 ```
 
+Run one real-data FAISS configuration without sparse or dense exact references:
+
+```bash
+python -m feed_ranking_ops.retrieval.run_ann_benchmark \
+  --processed-dir data/processed \
+  --reports-dir reports/ann_smoke_fast \
+  --limit-queries 100 \
+  --top-k 100 \
+  --svd-dims 64 \
+  --faiss-threads 4 \
+  --ann-only \
+  --single-config
+```
+
+ANN-only mode defaults to title text, a full-history mean profile, and FAISS Flat. It reports
+clicked-target retrieval quality and detailed stage timings, but deliberately does not report
+ANN agreement or approximation recall because dense exact retrieval is skipped. The original
+full sparse/dense/Flat/HNSW comparison remains available without `--ann-only`.
+
 Generated Outputs
 -----------------
 
@@ -276,6 +295,9 @@ ANN retrieval writes:
 - `reports/ann/validation_retrievals.parquet`
 - `reports/ann/test_retrievals.parquet`
 - `reports/ann/query_diagnostics.parquet`
+
+Fast ANN-only mode uses the same inspectable retrieval/diagnostic schemas and writes
+`validation_metrics.json` and `test_metrics.json` in place of the full comparison metric files.
 
 Processed data and generated reports are ignored by git by default.
 

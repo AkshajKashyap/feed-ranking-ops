@@ -14,6 +14,7 @@ from feed_ranking_ops.evaluation.processed import (
     ImpressionCandidate,
     NewsItem,
 )
+from feed_ranking_ops.retrieval import ann_protocol
 from feed_ranking_ops.retrieval.ann_metrics import agreement_metrics, representation_loss_metrics
 from feed_ranking_ops.retrieval.ann_protocol import (
     _runtime_environment,
@@ -37,6 +38,20 @@ ANN_OUTPUTS = [
     "validation_ann_metrics.json",
     "test_representation_metrics.json",
     "test_ann_metrics.json",
+    "config_sweep.csv",
+    "latency_benchmark.csv",
+    "model_comparison.md",
+    "protocol.json",
+    "runtime_environment.json",
+    "selected_configuration.json",
+    "index_metadata.json",
+    "validation_retrievals.parquet",
+    "test_retrievals.parquet",
+    "query_diagnostics.parquet",
+]
+FAST_ANN_OUTPUTS = [
+    "validation_metrics.json",
+    "test_metrics.json",
     "config_sweep.csv",
     "latency_benchmark.csv",
     "model_comparison.md",
@@ -111,6 +126,28 @@ def _run_ann_smoke_cli(processed_dir: Path, reports_dir: Path) -> None:
             "42",
             "--faiss-threads",
             "1",
+        ]
+    )
+    assert exit_code == 0
+
+
+def _run_fast_ann_smoke_cli(processed_dir: Path, reports_dir: Path) -> None:
+    exit_code = ann_main(
+        [
+            "--processed-dir",
+            str(processed_dir),
+            "--reports-dir",
+            str(reports_dir),
+            "--limit-queries",
+            "2",
+            "--svd-dims",
+            "2",
+            "--top-k",
+            "10",
+            "--faiss-threads",
+            "1",
+            "--ann-only",
+            "--single-config",
         ]
     )
     assert exit_code == 0
@@ -327,11 +364,95 @@ def test_ann_cli_parser_imports_and_parses_options():
             "32,64",
             "--top-k",
             "20",
+            "--ann-only",
+            "--single-config",
+            "--backend",
+            "flat",
         ]
     )
 
     assert args.svd_dims == "32,64"
     assert args.top_k == 20
+    assert args.ann_only is True
+    assert args.single_config is True
+    assert args.backend == "flat"
+
+
+def test_ann_only_single_config_skips_dense_reference_and_writes_outputs(
+    tmp_path: Path,
+    monkeypatch,
+):
+    pytest.importorskip("faiss")
+    processed_dir = _prepare_ann_smoke_fixture(tmp_path)
+    reports_dir = tmp_path / "fast_ann"
+
+    def fail_dense_reference(**kwargs):
+        raise AssertionError("dense exact reference must be skipped in ANN-only mode")
+
+    monkeypatch.setattr(ann_protocol, "_evaluate_sparse_dense", fail_dense_reference)
+    _run_fast_ann_smoke_cli(processed_dir, reports_dir)
+
+    for filename in FAST_ANN_OUTPUTS:
+        assert (reports_dir / filename).is_file()
+    protocol = json.loads((reports_dir / "protocol.json").read_text(encoding="utf-8"))
+    validation = json.loads(
+        (reports_dir / "validation_metrics.json").read_text(encoding="utf-8")
+    )
+    test = json.loads((reports_dir / "test_metrics.json").read_text(encoding="utf-8"))
+    with (reports_dir / "config_sweep.csv").open(encoding="utf-8", newline="") as source:
+        assert len(list(csv.DictReader(source))) == 1
+
+    assert protocol["ann_only"] is True
+    assert protocol["single_config"] is True
+    assert protocol["single_config_requested"] is True
+    assert protocol["backend"] == "flat"
+    assert protocol["dense_exact_comparison_skipped"] is True
+    assert protocol["ann_approximation_recall_available"] is False
+    assert protocol["timing"]["number_of_queries"] == 3
+    assert protocol["timing"]["number_of_indexed_articles"] == 5
+    assert protocol["timing"]["tfidf_vectorization_seconds"] >= 0
+    assert protocol["timing"]["svd_fit_projection_seconds"] >= 0
+    assert protocol["timing"]["faiss_index_build_seconds"] >= 0
+    assert protocol["timing"]["faiss_search_seconds"] >= 0
+    assert protocol["timing"]["total_runtime_seconds"] >= 0
+    assert protocol["timing"]["peak_memory_bytes"] > 0
+    assert validation["dense_exact_comparison_skipped"] is True
+    assert validation["agreement_metrics"] is None
+    assert validation["n_queries"] == 1
+    assert test["n_queries"] == 2
+    assert "Dense exact retrieval was skipped" in (
+        reports_dir / "model_comparison.md"
+    ).read_text(encoding="utf-8")
+    for path in reports_dir.glob("*.parquet"):
+        assert pq.read_table(path).num_rows > 0
+
+
+def test_fast_ann_smoke_is_deterministic_when_faiss_available(tmp_path: Path):
+    pytest.importorskip("faiss")
+    processed_dir = _prepare_ann_smoke_fixture(tmp_path)
+    first_dir = tmp_path / "first_fast"
+    second_dir = tmp_path / "second_fast"
+
+    _run_fast_ann_smoke_cli(processed_dir, first_dir)
+    _run_fast_ann_smoke_cli(processed_dir, second_dir)
+
+    for filename in ["validation_metrics.json", "test_metrics.json"]:
+        first = json.loads((first_dir / filename).read_text(encoding="utf-8"))
+        second = json.loads((second_dir / filename).read_text(encoding="utf-8"))
+        assert first["metrics"] == second["metrics"]
+        assert first["configuration"] == second["configuration"]
+    for filename in ["validation_retrievals.parquet", "test_retrievals.parquet"]:
+        columns = [
+            "partition",
+            "impression_id",
+            "method",
+            "retrieved_rank",
+            "retrieved_news_id",
+            "score",
+        ]
+        first = pq.read_table(first_dir / filename, columns=columns)
+        second = pq.read_table(second_dir / filename, columns=columns)
+        assert first.equals(second)
 
 
 def test_ann_smoke_workflow_writes_readable_outputs_when_faiss_available(tmp_path: Path):
