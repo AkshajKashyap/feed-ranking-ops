@@ -98,6 +98,19 @@ Stage timing in `protocol.json` covers processed-data loading, availability cons
 TF-IDF vectorization, SVD fitting/projection, FAISS index construction, FAISS search, metrics,
 total runtime, query/article counts, average eligible catalog sizes, and peak process memory.
 
+ANN-only search constructs all dense user profiles for a partition once, stacks them into a
+query matrix, and calls FAISS in configurable batches. `--query-batch-size` defaults to 256.
+This avoids the large thread-dispatch overhead from issuing one small FAISS call per query.
+
+Availability and history exclusion remain query-specific. FAISS overfetches according to
+`--oversampling`; queries that still lack top-K eligible results are searched again at a
+larger depth in batches. Protocol timing separates profile construction, query-matrix
+construction, raw FAISS search, availability filtering, history exclusion, and final top-K
+work. It also records mean raw candidates requested and queries returning fewer than top-K.
+
+Coarse progress messages identify data loading, representation fitting, index building,
+validation/test search batches, evaluation, and report writing.
+
 ## Outputs
 
 The benchmark writes JSON summaries, CSV sweeps, Parquet retrievals, query diagnostics,
@@ -139,7 +152,8 @@ python -m feed_ranking_ops.retrieval.run_ann_benchmark \
   --svd-dims 64 \
   --faiss-threads 4 \
   --ann-only \
-  --single-config
+  --single-config \
+  --query-batch-size 256
 ```
 
 This writes `validation_metrics.json`, `test_metrics.json`, `protocol.json`, and

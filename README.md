@@ -234,13 +234,16 @@ python -m feed_ranking_ops.retrieval.run_ann_benchmark \
   --svd-dims 64 \
   --faiss-threads 4 \
   --ann-only \
-  --single-config
+  --single-config \
+  --query-batch-size 256
 ```
 
 ANN-only mode defaults to title text, a full-history mean profile, and FAISS Flat. It reports
 clicked-target retrieval quality and detailed stage timings, but deliberately does not report
 ANN agreement or approximation recall because dense exact retrieval is skipped. The original
-full sparse/dense/Flat/HNSW comparison remains available without `--ann-only`.
+full sparse/dense/Flat/HNSW comparison remains available without `--ann-only`. Query profiles
+are stacked and searched in FAISS batches; iterative oversampling preserves per-query
+availability and history filtering while avoiding one FAISS call per query.
 
 Generated Outputs
 -----------------

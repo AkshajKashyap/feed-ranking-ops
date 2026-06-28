@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from feed_ranking_ops.evaluation.processed import BehaviorImpression, ImpressionCandidate, NewsItem
@@ -125,6 +126,48 @@ def test_faiss_hnsw_builds_and_searches():
 
     assert len(search.news_ids) == 2
     assert search.raw_candidates_examined >= 2
+
+
+def test_faiss_batch_search_respects_eligibility_and_history():
+    dense_index = _dense_index()
+    loaded = build_faiss_index(
+        dense_index,
+        FaissIndexConfig(index_type="flat", oversampling_factor=1),
+    )
+    availability = derive_article_availability(
+        {
+            "train": [
+                _behavior(
+                    "fit",
+                    hour=1,
+                    history=[],
+                    candidates=[("A", 1), ("B", 0), ("C", 0)],
+                )
+            ]
+        }
+    )
+    vectors = np.vstack(
+        [
+            dense_index.vectors[dense_index.article_to_row["A"]],
+            dense_index.vectors[dense_index.article_to_row["A"]],
+        ]
+    )
+
+    batch = loaded.search_batch(
+        vectors,
+        eligible_news_ids=[frozenset({"A", "B"}), frozenset({"C"})],
+        history_news_ids=[frozenset({"A"}), frozenset()],
+        availability=availability,
+        top_k=1,
+        exclude_history=True,
+        batch_size=2,
+    )
+
+    assert batch.results[0].news_ids == ["B"]
+    assert batch.results[1].news_ids == ["C"]
+    assert batch.results[0].rejected_history_count >= 1
+    assert batch.results[1].rejected_unavailable_count >= 1
+    assert batch.batch_count == 1
 
 
 def test_faiss_load_rejects_incompatible_dimension(tmp_path: Path):

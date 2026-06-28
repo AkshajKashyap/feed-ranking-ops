@@ -82,6 +82,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.5,
         help="Recency decay used when --profile-method=recency.",
     )
+    parser.add_argument(
+        "--query-batch-size",
+        type=int,
+        default=256,
+        help="ANN-only FAISS query-matrix batch size.",
+    )
     return parser
 
 
@@ -112,6 +118,7 @@ def main(argv: list[str] | None = None) -> int:
             profile_decay=(
                 args.profile_decay if args.profile_method == "recency" else None
             ),
+            query_batch_size=args.query_batch_size,
         )
     except FaissUnavailableError as exc:
         raise SystemExit(f"ANN benchmark failed: {exc}") from exc

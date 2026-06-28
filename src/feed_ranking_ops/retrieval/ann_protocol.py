@@ -13,6 +13,7 @@ from statistics import mean
 from time import perf_counter
 from typing import Any
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -100,10 +101,26 @@ class AnnBenchmarkConfiguration:
 
 
 @dataclass(frozen=True)
+class CatalogEligibilityView:
+    catalog_index: CatalogEligibilityIndex
+    query_timestamp: datetime
+    eligible_count_after_history_exclusion: int
+
+    def __contains__(self, news_id: object) -> bool:
+        return isinstance(news_id, str) and self.catalog_index.contains(
+            news_id,
+            self.query_timestamp,
+        )
+
+    def __len__(self) -> int:
+        return self.eligible_count_after_history_exclusion
+
+
+@dataclass(frozen=True)
 class PreparedAnnQuery:
     query: RetrievalQuery
     eligible_news_ids: list[str]
-    eligible_news_id_set: frozenset[str]
+    eligible_news_lookup: CatalogEligibilityView
     history_news_ids: frozenset[str]
     target_info: dict[str, object]
 
@@ -131,6 +148,7 @@ def run_ann_benchmark(
     profile_method: str = "mean",
     max_history_length: int | None = None,
     profile_decay: float | None = None,
+    query_batch_size: int = 256,
 ) -> dict[str, Any]:
     if top_k <= 0:
         raise ValueError("top_k must be positive")
@@ -155,6 +173,8 @@ def run_ann_benchmark(
         profile_decay is None or not 0 < profile_decay <= 1
     ):
         raise ValueError("recency profile requires profile_decay in (0, 1]")
+    if query_batch_size <= 0:
+        raise ValueError("query_batch_size must be positive")
     if single_config:
         dimensions = dimensions[:1]
         hnsw_m_values = hnsw_m_values[:1]
@@ -185,6 +205,7 @@ def run_ann_benchmark(
             faiss_threads=faiss_threads,
             save_index=save_index,
             single_config=single_config,
+            query_batch_size=query_batch_size,
         )
 
     dataset = load_processed_dataset(processed_dir)
@@ -528,12 +549,15 @@ def _run_ann_only_benchmark(
     faiss_threads: int | None,
     save_index: bool,
     single_config: bool,
+    query_batch_size: int,
 ) -> dict[str, Any]:
     total_start = perf_counter()
+    print("[ANN] loading and validating processed data", flush=True)
     dataset_load_start = perf_counter()
     dataset = load_processed_dataset(processed_dir)
     dataset_load_seconds = perf_counter() - dataset_load_start
 
+    print("[ANN] constructing availability and query inputs", flush=True)
     availability_start = perf_counter()
     availability = derive_article_availability(dataset.behaviors)
     availability_seconds = perf_counter() - availability_start
@@ -580,6 +604,7 @@ def _run_ann_only_benchmark(
     )
     validation_query_preparation_seconds = perf_counter() - query_preparation_start
 
+    print("[ANN] fitting validation dense representation", flush=True)
     validation_dense_index = fit_dense_article_index(
         news=dataset.news,
         fitting_behaviors=train,
@@ -592,27 +617,28 @@ def _run_ann_only_benchmark(
         train,
         fitting_partitions=["train"],
     )
+    print(f"[ANN] building validation FAISS {backend} index", flush=True)
     validation_index_start = perf_counter()
     validation_faiss_index = build_faiss_index(
         validation_dense_index,
         config.faiss_config(),
     )
     validation_index_build_seconds = perf_counter() - validation_index_start
-    validation_eval = _evaluate_faiss_method(
+    print("[ANN] validation batched search", flush=True)
+    validation_eval = _evaluate_faiss_method_batched(
         method_name=f"faiss_{backend}",
+        partition_name="validation",
         dataset=dataset,
         dense_index=validation_dense_index,
         faiss_index=validation_faiss_index,
         fallback=validation_fallback,
         eval_queries=validation_queries,
+        prepared_queries=prepared_validation,
         availability=availability,
-        catalog_protocol=catalog_protocol,
-        static_catalog_ids=validation_static_catalog,
         profile_config=config.profile_config(),
         top_k=top_k,
         exclude_history=config.exclude_history,
-        dense_reference_results=None,
-        prepared_queries=prepared_validation,
+        query_batch_size=query_batch_size,
     )
 
     final_static_catalog = _static_catalog(
@@ -636,6 +662,7 @@ def _run_ann_only_benchmark(
     )
     test_query_preparation_seconds = perf_counter() - query_preparation_start
 
+    print("[ANN] fitting final dense representation", flush=True)
     final_dense_index = fit_dense_article_index(
         news=dataset.news,
         fitting_behaviors=[*train, *validation],
@@ -648,27 +675,28 @@ def _run_ann_only_benchmark(
         [*train, *validation],
         fitting_partitions=["train", "validation"],
     )
+    print(f"[ANN] building final FAISS {backend} index", flush=True)
     final_index_start = perf_counter()
     final_faiss_index = build_faiss_index(
         final_dense_index,
         config.faiss_config(),
     )
     final_index_build_seconds = perf_counter() - final_index_start
-    test_eval = _evaluate_faiss_method(
+    print("[ANN] internal-test batched search", flush=True)
+    test_eval = _evaluate_faiss_method_batched(
         method_name=f"faiss_{backend}",
+        partition_name="internal-test",
         dataset=dataset,
         dense_index=final_dense_index,
         faiss_index=final_faiss_index,
         fallback=final_fallback,
         eval_queries=test_queries,
+        prepared_queries=prepared_test,
         availability=availability,
-        catalog_protocol=catalog_protocol,
-        static_catalog_ids=final_static_catalog,
         profile_config=config.profile_config(),
         top_k=top_k,
         exclude_history=config.exclude_history,
-        dense_reference_results=None,
-        prepared_queries=prepared_test,
+        query_batch_size=query_batch_size,
     )
 
     timing = _ann_only_timing(
@@ -724,6 +752,7 @@ def _run_ann_only_benchmark(
         "limit_queries": limit_queries,
         "seed": seed,
         "faiss_threads": faiss_threads,
+        "query_batch_size": query_batch_size,
         "validation_fit_partitions": ["train"],
         "validation_eval_partition": "validation",
         "test_fit_partitions": ["train", "validation"],
@@ -741,6 +770,7 @@ def _run_ann_only_benchmark(
     }
     runtime = _runtime_environment()
 
+    print("[ANN] writing metrics and reports", flush=True)
     reports_dir.mkdir(parents=True, exist_ok=True)
     outputs = {
         "validation_metrics": reports_dir / "validation_metrics.json",
@@ -1124,6 +1154,288 @@ def _evaluate_faiss_method(
     }
 
 
+def _evaluate_faiss_method_batched(
+    *,
+    method_name: str,
+    partition_name: str,
+    dataset: ProcessedDataset,
+    dense_index: DenseArticleIndex,
+    faiss_index: LoadedFaissIndex,
+    fallback: PopularityFallback,
+    eval_queries: list[RetrievalQuery],
+    prepared_queries: dict[str, PreparedAnnQuery],
+    availability,
+    profile_config: HistoryProfileConfig,
+    top_k: int,
+    exclude_history: bool,
+    query_batch_size: int,
+) -> dict[str, Any]:
+    evaluation_start = perf_counter()
+    results_by_position: list[RetrievalResult | None] = [None] * len(eval_queries)
+    diagnostics_by_position: list[dict[str, Any] | None] = [None] * len(eval_queries)
+    searchable_positions: list[int] = []
+    searchable_vectors: list[np.ndarray] = []
+    searchable_profiles = []
+    profile_seconds_by_position = np.zeros(len(eval_queries), dtype=np.float64)
+    fallback_ranking_seconds = 0.0
+
+    profile_start = perf_counter()
+    for position, query in enumerate(eval_queries):
+        prepared = prepared_queries[query.impression_id]
+        query_profile_start = perf_counter()
+        profile = build_dense_user_profile(
+            query.history_news_ids,
+            dense_index,
+            profile_config,
+        )
+        profile_seconds_by_position[position] = perf_counter() - query_profile_start
+        fallback_reason = profile.fallback_reason
+        if not prepared.eligible_news_ids:
+            results_by_position[position] = _make_ann_retrieval_result(
+                query=query,
+                prepared=prepared,
+                ranked_ids=[],
+                score_by_id={},
+                profile=profile,
+                fallback_used=True,
+                fallback_reason=fallback_reason or "no_eligible_articles",
+                latency_seconds=float(profile_seconds_by_position[position]),
+            )
+            diagnostics_by_position[position] = _empty_ann_diagnostics(method_name)
+        elif fallback_reason is not None:
+            fallback_start = perf_counter()
+            ranked_ids = fallback.rank(
+                prepared.eligible_news_ids,
+                availability,
+                top_k=top_k,
+            )
+            fallback_elapsed = perf_counter() - fallback_start
+            fallback_ranking_seconds += fallback_elapsed
+            results_by_position[position] = _make_ann_retrieval_result(
+                query=query,
+                prepared=prepared,
+                ranked_ids=ranked_ids,
+                score_by_id={
+                    news_id: fallback.score(news_id) for news_id in ranked_ids
+                },
+                profile=profile,
+                fallback_used=True,
+                fallback_reason=fallback_reason,
+                latency_seconds=(
+                    float(profile_seconds_by_position[position]) + fallback_elapsed
+                ),
+            )
+            diagnostics_by_position[position] = _empty_ann_diagnostics(method_name)
+        else:
+            searchable_positions.append(position)
+            searchable_vectors.append(profile.vector)
+            searchable_profiles.append(profile)
+    profile_construction_seconds = perf_counter() - profile_start
+    print(
+        f"[ANN] {partition_name} profiles: {len(searchable_positions)} searchable, "
+        f"{len(eval_queries) - len(searchable_positions)} fallback",
+        flush=True,
+    )
+
+    query_matrix_start = perf_counter()
+    query_matrix = (
+        np.ascontiguousarray(np.vstack(searchable_vectors), dtype=np.float32)
+        if searchable_vectors
+        else np.empty((0, dense_index.effective_dimension), dtype=np.float32)
+    )
+    query_matrix_construction_seconds = perf_counter() - query_matrix_start
+
+    def progress(completed: int, total: int) -> None:
+        print(
+            f"[ANN] {partition_name} search batch progress: {completed}/{total}",
+            flush=True,
+        )
+
+    batch_search = faiss_index.search_batch(
+        query_matrix,
+        eligible_news_ids=[
+            prepared_queries[eval_queries[position].impression_id].eligible_news_lookup
+            for position in searchable_positions
+        ],
+        history_news_ids=[
+            prepared_queries[eval_queries[position].impression_id].history_news_ids
+            for position in searchable_positions
+        ],
+        availability=availability,
+        top_k=top_k,
+        exclude_history=exclude_history,
+        batch_size=query_batch_size,
+        progress_callback=progress,
+    )
+    for batch_position, search in enumerate(batch_search.results):
+        position = searchable_positions[batch_position]
+        query = eval_queries[position]
+        prepared = prepared_queries[query.impression_id]
+        profile = searchable_profiles[batch_position]
+        results_by_position[position] = _make_ann_retrieval_result(
+            query=query,
+            prepared=prepared,
+            ranked_ids=search.news_ids,
+            score_by_id=search.scores,
+            profile=profile,
+            fallback_used=False,
+            fallback_reason=None,
+            latency_seconds=(
+                float(profile_seconds_by_position[position])
+                + search.latency_seconds
+            ),
+        )
+        diagnostics_by_position[position] = {
+            "method": method_name,
+            **asdict(search),
+            "search_latency_seconds": search.latency_seconds,
+        }
+
+    results = [result for result in results_by_position if result is not None]
+    diagnostic_rows = []
+    prediction_rows = []
+    for position, result in enumerate(results_by_position):
+        if result is None:
+            raise RuntimeError("batched ANN result alignment failed")
+        diagnostics = diagnostics_by_position[position]
+        if diagnostics is None:
+            raise RuntimeError("batched ANN diagnostics alignment failed")
+        diagnostic_rows.append(
+            {
+                "partition": result.query.partition,
+                "impression_id": result.query.impression_id,
+                "method": method_name,
+                "raw_search_calls": diagnostics["raw_search_calls"],
+                "raw_candidates_examined": diagnostics["raw_candidates_examined"],
+                "rejected_history_count": diagnostics["rejected_history_count"],
+                "rejected_unavailable_count": diagnostics[
+                    "rejected_unavailable_count"
+                ],
+                "rejected_invalid_count": diagnostics["rejected_invalid_count"],
+                "rejected_duplicate_count": diagnostics[
+                    "rejected_duplicate_count"
+                ],
+                "unable_to_fill_top_k": diagnostics["unable_to_fill_top_k"],
+                "oversampled_search": diagnostics["oversampled_search"],
+                "agreement_set_recall@100": None,
+                "agreement_top1": None,
+                "first_differing_rank": None,
+            }
+        )
+        prediction_rows.extend(
+            _prediction_rows(
+                result,
+                method_name=method_name,
+                configuration_name=faiss_index.metadata["metadata_fingerprint"],
+            )
+        )
+
+    metric_start = perf_counter()
+    metrics = evaluate_retrieval_results(results, catalog_size_total=len(dataset.news))
+    metric_evaluation_seconds = perf_counter() - metric_start
+    raw_requested = [
+        int(diagnostics["raw_candidates_requested"])
+        for diagnostics in diagnostics_by_position
+        if diagnostics is not None
+    ]
+    unable_count = sum(
+        1
+        for diagnostics in diagnostics_by_position
+        if diagnostics is not None and diagnostics["unable_to_fill_top_k"]
+    )
+    fewer_than_top_k_count = sum(
+        1 for result in results if len(result.retrieved) < top_k
+    )
+    return {
+        "metrics": metrics,
+        "agreement_metrics": {},
+        "results": results,
+        "prediction_rows": prediction_rows,
+        "diagnostic_rows": diagnostic_rows,
+        "timing": {
+            "profile_construction_seconds": profile_construction_seconds,
+            "fallback_ranking_seconds": fallback_ranking_seconds,
+            "query_matrix_construction_seconds": query_matrix_construction_seconds,
+            "search_seconds": batch_search.raw_search_seconds,
+            "availability_filter_seconds": batch_search.availability_filter_seconds,
+            "history_exclusion_seconds": batch_search.history_exclusion_seconds,
+            "final_top_k_seconds": batch_search.final_top_k_seconds,
+            "other_filter_seconds": batch_search.other_filter_seconds,
+            "metric_evaluation_seconds": metric_evaluation_seconds,
+            "total_evaluation_seconds": perf_counter() - evaluation_start,
+            "query_batch_size": query_batch_size,
+            "batch_count": batch_search.batch_count,
+            "searchable_query_count": len(searchable_positions),
+            "fallback_query_count": len(eval_queries) - len(searchable_positions),
+            "mean_raw_candidates_requested": (
+                float(mean(raw_requested)) if raw_requested else None
+            ),
+            "max_raw_candidates_requested": max(raw_requested, default=0),
+            "queries_unable_to_fill_top_k": unable_count,
+            "unable_to_fill_top_k_rate": (
+                unable_count / len(eval_queries) if eval_queries else None
+            ),
+            "queries_returned_fewer_than_top_k": fewer_than_top_k_count,
+            "returned_fewer_than_top_k_rate": (
+                fewer_than_top_k_count / len(eval_queries) if eval_queries else None
+            ),
+        },
+    }
+
+
+def _make_ann_retrieval_result(
+    *,
+    query: RetrievalQuery,
+    prepared: PreparedAnnQuery,
+    ranked_ids: list[str],
+    score_by_id: dict[str, float],
+    profile,
+    fallback_used: bool,
+    fallback_reason: str | None,
+    latency_seconds: float,
+) -> RetrievalResult:
+    return RetrievalResult(
+        query=query,
+        retrieved=[
+            RetrievedArticle(
+                news_id=news_id,
+                rank=rank,
+                score=float(score_by_id[news_id]),
+                was_in_history=news_id in prepared.history_news_ids,
+            )
+            for rank, news_id in enumerate(ranked_ids, start=1)
+        ],
+        target_news_ids=list(query.clicked_target_news_ids),
+        available_target_news_ids=list(prepared.target_info["available_targets"]),
+        unavailable_target_count=len(prepared.target_info["unavailable_targets"]),
+        missing_target_metadata_count=int(
+            prepared.target_info["missing_metadata_count"]
+        ),
+        catalog_size=len(prepared.eligible_news_ids),
+        known_history_count=profile.known_history_count,
+        unknown_history_count=profile.unknown_history_count,
+        fallback_used=fallback_used,
+        fallback_reason=fallback_reason,
+        latency_seconds=latency_seconds,
+    )
+
+
+def _empty_ann_diagnostics(method_name: str) -> dict[str, Any]:
+    return {
+        "method": method_name,
+        "raw_search_calls": 0,
+        "raw_candidates_requested": 0,
+        "raw_candidates_examined": 0,
+        "rejected_history_count": 0,
+        "rejected_unavailable_count": 0,
+        "rejected_invalid_count": 0,
+        "rejected_duplicate_count": 0,
+        "unable_to_fill_top_k": False,
+        "oversampled_search": False,
+        "search_latency_seconds": 0.0,
+    }
+
+
 def _retrieve_faiss_for_query(
     query: RetrievalQuery,
     *,
@@ -1163,7 +1475,7 @@ def _retrieve_faiss_for_query(
     else:
         target_info = prepared_query.target_info
         eligible = prepared_query.eligible_news_ids
-        eligible_set = prepared_query.eligible_news_id_set
+        eligible_set = prepared_query.eligible_news_lookup
         history = prepared_query.history_news_ids
     profile = build_dense_user_profile(query.history_news_ids, dense_index, profile_config)
     fallback_reason = profile.fallback_reason
@@ -1487,9 +1799,10 @@ def _prepare_ann_queries(
     prepared: dict[str, PreparedAnnQuery] = {}
     for query in queries:
         history = frozenset(query.history_news_ids)
-        eligible = catalog_index.eligible_ids(query.timestamp)
+        available = catalog_index.eligible_ids(query.timestamp)
+        eligible = available
         if exclude_history:
-            eligible = [news_id for news_id in eligible if news_id not in history]
+            eligible = [news_id for news_id in available if news_id not in history]
         targets_with_metadata = [
             news_id for news_id in query.clicked_target_news_ids if news_id in news_ids
         ]
@@ -1502,7 +1815,11 @@ def _prepare_ann_queries(
         prepared[query.impression_id] = PreparedAnnQuery(
             query=query,
             eligible_news_ids=eligible,
-            eligible_news_id_set=frozenset(eligible),
+            eligible_news_lookup=CatalogEligibilityView(
+                catalog_index=catalog_index,
+                query_timestamp=query.timestamp,
+                eligible_count_after_history_exclusion=len(eligible),
+            ),
             history_news_ids=history,
             target_info={
                 "targets_with_metadata": targets_with_metadata,
@@ -1568,8 +1885,57 @@ def _ann_only_timing(
             validation_eval["timing"]["search_seconds"]
             + test_eval["timing"]["search_seconds"]
         ),
+        "profile_construction_seconds": (
+            validation_eval["timing"]["profile_construction_seconds"]
+            + test_eval["timing"]["profile_construction_seconds"]
+        ),
+        "fallback_ranking_seconds": (
+            validation_eval["timing"]["fallback_ranking_seconds"]
+            + test_eval["timing"]["fallback_ranking_seconds"]
+        ),
+        "query_matrix_construction_seconds": (
+            validation_eval["timing"]["query_matrix_construction_seconds"]
+            + test_eval["timing"]["query_matrix_construction_seconds"]
+        ),
+        "availability_filter_seconds": (
+            validation_eval["timing"]["availability_filter_seconds"]
+            + test_eval["timing"]["availability_filter_seconds"]
+        ),
+        "history_exclusion_seconds": (
+            validation_eval["timing"]["history_exclusion_seconds"]
+            + test_eval["timing"]["history_exclusion_seconds"]
+        ),
+        "final_top_k_seconds": (
+            validation_eval["timing"]["final_top_k_seconds"]
+            + test_eval["timing"]["final_top_k_seconds"]
+        ),
+        "other_filter_seconds": (
+            validation_eval["timing"]["other_filter_seconds"]
+            + test_eval["timing"]["other_filter_seconds"]
+        ),
         "validation_search_seconds": validation_eval["timing"]["search_seconds"],
         "test_search_seconds": test_eval["timing"]["search_seconds"],
+        "query_batch_size": validation_eval["timing"]["query_batch_size"],
+        "validation_batch_count": validation_eval["timing"]["batch_count"],
+        "test_batch_count": test_eval["timing"]["batch_count"],
+        "validation_mean_raw_candidates_requested": validation_eval["timing"][
+            "mean_raw_candidates_requested"
+        ],
+        "test_mean_raw_candidates_requested": test_eval["timing"][
+            "mean_raw_candidates_requested"
+        ],
+        "validation_queries_unable_to_fill_top_k": validation_eval["timing"][
+            "queries_unable_to_fill_top_k"
+        ],
+        "test_queries_unable_to_fill_top_k": test_eval["timing"][
+            "queries_unable_to_fill_top_k"
+        ],
+        "validation_queries_returned_fewer_than_top_k": validation_eval["timing"][
+            "queries_returned_fewer_than_top_k"
+        ],
+        "test_queries_returned_fewer_than_top_k": test_eval["timing"][
+            "queries_returned_fewer_than_top_k"
+        ],
         "evaluation_seconds": (
             validation_eval["timing"]["total_evaluation_seconds"]
             + test_eval["timing"]["total_evaluation_seconds"]

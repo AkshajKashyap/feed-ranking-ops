@@ -131,7 +131,12 @@ def _run_ann_smoke_cli(processed_dir: Path, reports_dir: Path) -> None:
     assert exit_code == 0
 
 
-def _run_fast_ann_smoke_cli(processed_dir: Path, reports_dir: Path) -> None:
+def _run_fast_ann_smoke_cli(
+    processed_dir: Path,
+    reports_dir: Path,
+    *,
+    query_batch_size: int = 256,
+) -> None:
     exit_code = ann_main(
         [
             "--processed-dir",
@@ -148,6 +153,8 @@ def _run_fast_ann_smoke_cli(processed_dir: Path, reports_dir: Path) -> None:
             "1",
             "--ann-only",
             "--single-config",
+            "--query-batch-size",
+            str(query_batch_size),
         ]
     )
     assert exit_code == 0
@@ -368,6 +375,8 @@ def test_ann_cli_parser_imports_and_parses_options():
             "--single-config",
             "--backend",
             "flat",
+            "--query-batch-size",
+            "32",
         ]
     )
 
@@ -376,6 +385,7 @@ def test_ann_cli_parser_imports_and_parses_options():
     assert args.ann_only is True
     assert args.single_config is True
     assert args.backend == "flat"
+    assert args.query_batch_size == 32
 
 
 def test_ann_only_single_config_skips_dense_reference_and_writes_outputs(
@@ -414,8 +424,17 @@ def test_ann_only_single_config_skips_dense_reference_and_writes_outputs(
     assert protocol["timing"]["svd_fit_projection_seconds"] >= 0
     assert protocol["timing"]["faiss_index_build_seconds"] >= 0
     assert protocol["timing"]["faiss_search_seconds"] >= 0
+    assert protocol["timing"]["profile_construction_seconds"] >= 0
+    assert protocol["timing"]["query_matrix_construction_seconds"] >= 0
+    assert protocol["timing"]["availability_filter_seconds"] >= 0
+    assert protocol["timing"]["history_exclusion_seconds"] >= 0
+    assert protocol["timing"]["final_top_k_seconds"] >= 0
     assert protocol["timing"]["total_runtime_seconds"] >= 0
     assert protocol["timing"]["peak_memory_bytes"] > 0
+    assert protocol["timing"]["validation_batch_count"] == 1
+    assert protocol["timing"]["test_batch_count"] == 1
+    assert protocol["timing"]["validation_queries_returned_fewer_than_top_k"] == 1
+    assert protocol["timing"]["test_queries_returned_fewer_than_top_k"] == 2
     assert validation["dense_exact_comparison_skipped"] is True
     assert validation["agreement_metrics"] is None
     assert validation["n_queries"] == 1
@@ -427,14 +446,14 @@ def test_ann_only_single_config_skips_dense_reference_and_writes_outputs(
         assert pq.read_table(path).num_rows > 0
 
 
-def test_fast_ann_smoke_is_deterministic_when_faiss_available(tmp_path: Path):
+def test_fast_ann_batch_size_does_not_change_results(tmp_path: Path):
     pytest.importorskip("faiss")
     processed_dir = _prepare_ann_smoke_fixture(tmp_path)
     first_dir = tmp_path / "first_fast"
     second_dir = tmp_path / "second_fast"
 
-    _run_fast_ann_smoke_cli(processed_dir, first_dir)
-    _run_fast_ann_smoke_cli(processed_dir, second_dir)
+    _run_fast_ann_smoke_cli(processed_dir, first_dir, query_batch_size=1)
+    _run_fast_ann_smoke_cli(processed_dir, second_dir, query_batch_size=256)
 
     for filename in ["validation_metrics.json", "test_metrics.json"]:
         first = json.loads((first_dir / filename).read_text(encoding="utf-8"))
@@ -453,6 +472,10 @@ def test_fast_ann_smoke_is_deterministic_when_faiss_available(tmp_path: Path):
         first = pq.read_table(first_dir / filename, columns=columns)
         second = pq.read_table(second_dir / filename, columns=columns)
         assert first.equals(second)
+        assert first.num_rows > 0
+    for reports_dir in [first_dir, second_dir]:
+        retrievals = pq.read_table(reports_dir / "test_retrievals.parquet")
+        assert not any(retrievals.column("was_in_history").to_pylist())
 
 
 def test_ann_smoke_workflow_writes_readable_outputs_when_faiss_available(tmp_path: Path):

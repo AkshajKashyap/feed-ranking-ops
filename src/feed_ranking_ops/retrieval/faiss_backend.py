@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import numpy as np
 
@@ -14,6 +15,12 @@ from feed_ranking_ops.retrieval.availability import ArticleAvailability
 from feed_ranking_ops.retrieval.dense import DenseArticleIndex
 
 FaissIndexType = Literal["flat", "hnsw"]
+
+
+class EligibilityLookup(Protocol):
+    def __contains__(self, news_id: object) -> bool: ...
+
+    def __len__(self) -> int: ...
 
 
 class FaissUnavailableError(RuntimeError):
@@ -47,6 +54,7 @@ class FaissSearchResult:
     scores: dict[str, float]
     latency_seconds: float
     raw_search_calls: int
+    raw_candidates_requested: int
     raw_candidates_examined: int
     rejected_history_count: int
     rejected_unavailable_count: int
@@ -54,6 +62,17 @@ class FaissSearchResult:
     rejected_duplicate_count: int
     unable_to_fill_top_k: bool
     oversampled_search: bool
+
+
+@dataclass
+class FaissBatchSearchResult:
+    results: list[FaissSearchResult]
+    batch_count: int
+    raw_search_seconds: float
+    availability_filter_seconds: float
+    history_exclusion_seconds: float
+    final_top_k_seconds: float
+    other_filter_seconds: float
 
 
 @dataclass
@@ -76,8 +95,8 @@ class LoadedFaissIndex:
         self,
         query_vector: np.ndarray,
         *,
-        eligible_news_ids: set[str],
-        history_news_ids: set[str],
+        eligible_news_ids: EligibilityLookup,
+        history_news_ids: set[str] | frozenset[str],
         availability: ArticleAvailability,
         top_k: int,
         exclude_history: bool,
@@ -131,6 +150,7 @@ class LoadedFaissIndex:
             scores={news_id: filtered.scores[news_id] for news_id in news_ids},
             latency_seconds=perf_counter() - start,
             raw_search_calls=raw_search_calls,
+            raw_candidates_requested=depth,
             raw_candidates_examined=len(final_indices),
             rejected_history_count=filtered.rejected_history_count,
             rejected_unavailable_count=filtered.rejected_unavailable_count,
@@ -138,6 +158,202 @@ class LoadedFaissIndex:
             rejected_duplicate_count=filtered.rejected_duplicate_count,
             unable_to_fill_top_k=len(news_ids) < top_k and len(news_ids) < len(eligible_news_ids),
             oversampled_search=depth > top_k,
+        )
+
+    def search_batch(
+        self,
+        query_vectors: np.ndarray,
+        *,
+        eligible_news_ids: list[EligibilityLookup],
+        history_news_ids: list[set[str] | frozenset[str]],
+        availability: ArticleAvailability,
+        top_k: int,
+        exclude_history: bool,
+        batch_size: int,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> FaissBatchSearchResult:
+        if top_k <= 0:
+            raise ValueError("top_k must be positive")
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        queries = np.ascontiguousarray(query_vectors, dtype=np.float32)
+        if queries.ndim != 2 or queries.shape[1] != self.dimension:
+            raise ValueError(
+                "query vector matrix must be 2D with the FAISS index dimension"
+            )
+        if not (
+            len(queries) == len(eligible_news_ids) == len(history_news_ids)
+        ):
+            raise ValueError("query vectors and filtering inputs must have equal lengths")
+
+        results: list[FaissSearchResult] = []
+        raw_search_seconds = 0.0
+        availability_filter_seconds = 0.0
+        history_exclusion_seconds = 0.0
+        final_top_k_seconds = 0.0
+        other_filter_seconds = 0.0
+        batch_count = 0
+        total = len(queries)
+        for start in range(0, total, batch_size):
+            stop = min(start + batch_size, total)
+            chunk = self._search_batch_chunk(
+                queries[start:stop],
+                eligible_news_ids=eligible_news_ids[start:stop],
+                history_news_ids=history_news_ids[start:stop],
+                availability=availability,
+                top_k=top_k,
+                exclude_history=exclude_history,
+            )
+            results.extend(chunk.results)
+            raw_search_seconds += chunk.raw_search_seconds
+            availability_filter_seconds += chunk.availability_filter_seconds
+            history_exclusion_seconds += chunk.history_exclusion_seconds
+            final_top_k_seconds += chunk.final_top_k_seconds
+            other_filter_seconds += chunk.other_filter_seconds
+            batch_count += 1
+            if progress_callback is not None:
+                progress_callback(stop, total)
+        return FaissBatchSearchResult(
+            results=results,
+            batch_count=batch_count,
+            raw_search_seconds=raw_search_seconds,
+            availability_filter_seconds=availability_filter_seconds,
+            history_exclusion_seconds=history_exclusion_seconds,
+            final_top_k_seconds=final_top_k_seconds,
+            other_filter_seconds=other_filter_seconds,
+        )
+
+    def _search_batch_chunk(
+        self,
+        query_vectors: np.ndarray,
+        *,
+        eligible_news_ids: list[EligibilityLookup],
+        history_news_ids: list[set[str] | frozenset[str]],
+        availability: ArticleAvailability,
+        top_k: int,
+        exclude_history: bool,
+    ) -> FaissBatchSearchResult:
+        count = len(query_vectors)
+        if count == 0:
+            return FaissBatchSearchResult([], 0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        depth = min(
+            self.index.ntotal,
+            max(top_k * self.config.oversampling_factor, top_k),
+        )
+        depth = max(depth, 1) if self.index.ntotal else 0
+        pending = np.arange(count, dtype=np.int64)
+        filtered_by_query: list[_FilteredCandidates | None] = [None] * count
+        raw_search_calls = np.zeros(count, dtype=np.int32)
+        raw_candidates_requested = np.zeros(count, dtype=np.int32)
+        raw_candidates_examined = np.zeros(count, dtype=np.int32)
+        per_query_latency = np.zeros(count, dtype=np.float64)
+        raw_search_seconds = 0.0
+        availability_filter_seconds = 0.0
+        history_exclusion_seconds = 0.0
+        final_top_k_seconds = 0.0
+        other_filter_seconds = 0.0
+
+        while depth > 0 and len(pending):
+            search_start = perf_counter()
+            scores, indices = self.index.search(query_vectors[pending], depth)
+            search_elapsed = perf_counter() - search_start
+            raw_search_seconds += search_elapsed
+            per_query_latency[pending] += search_elapsed / len(pending)
+            next_pending: list[int] = []
+            for local_index, query_index_value in enumerate(pending):
+                query_index = int(query_index_value)
+                filter_start = perf_counter()
+                row_indices = [
+                    int(index) for index in indices[local_index].tolist() if int(index) >= 0
+                ]
+                score_by_row = {
+                    int(index): float(score)
+                    for score, index in zip(
+                        scores[local_index].tolist(),
+                        indices[local_index].tolist(),
+                        strict=True,
+                    )
+                    if int(index) >= 0
+                }
+                filtered, filter_timing = _post_filter_indices_profiled(
+                    row_indices,
+                    article_ids=self.article_ids,
+                    scores=score_by_row,
+                    eligible_news_ids=eligible_news_ids[query_index],
+                    history_news_ids=history_news_ids[query_index],
+                    availability=availability,
+                    exclude_history=exclude_history,
+                )
+                filter_elapsed = perf_counter() - filter_start
+                per_query_latency[query_index] += filter_elapsed
+                filtered_by_query[query_index] = filtered
+                raw_search_calls[query_index] += 1
+                raw_candidates_requested[query_index] = depth
+                raw_candidates_examined[query_index] = len(row_indices)
+                availability_filter_seconds += filter_timing[
+                    "availability_filter_seconds"
+                ]
+                history_exclusion_seconds += filter_timing[
+                    "history_exclusion_seconds"
+                ]
+                final_top_k_seconds += filter_timing["final_top_k_seconds"]
+                other_filter_seconds += max(
+                    0.0,
+                    filter_elapsed
+                    - filter_timing["availability_filter_seconds"]
+                    - filter_timing["history_exclusion_seconds"]
+                    - filter_timing["final_top_k_seconds"],
+                )
+                if (
+                    len(filtered.news_ids) < top_k
+                    and depth < self.index.ntotal
+                    and len(filtered.news_ids)
+                    < len(eligible_news_ids[query_index])
+                ):
+                    next_pending.append(query_index)
+            pending = np.asarray(next_pending, dtype=np.int64)
+            if len(pending):
+                depth = min(self.index.ntotal, max(depth + 1, depth * 2))
+
+        results: list[FaissSearchResult] = []
+        for query_index, filtered in enumerate(filtered_by_query):
+            if filtered is None:
+                filtered = _FilteredCandidates([], {}, 0, 0, 0, 0)
+            truncation_start = perf_counter()
+            news_ids = filtered.news_ids[:top_k]
+            score_by_id = {
+                news_id: filtered.scores[news_id] for news_id in news_ids
+            }
+            truncation_elapsed = perf_counter() - truncation_start
+            final_top_k_seconds += truncation_elapsed
+            per_query_latency[query_index] += truncation_elapsed
+            results.append(
+                FaissSearchResult(
+                    news_ids=news_ids,
+                    scores=score_by_id,
+                    latency_seconds=float(per_query_latency[query_index]),
+                    raw_search_calls=int(raw_search_calls[query_index]),
+                    raw_candidates_requested=int(raw_candidates_requested[query_index]),
+                    raw_candidates_examined=int(raw_candidates_examined[query_index]),
+                    rejected_history_count=filtered.rejected_history_count,
+                    rejected_unavailable_count=filtered.rejected_unavailable_count,
+                    rejected_invalid_count=filtered.rejected_invalid_count,
+                    rejected_duplicate_count=filtered.rejected_duplicate_count,
+                    unable_to_fill_top_k=(
+                        len(news_ids) < top_k
+                        and len(news_ids) < len(eligible_news_ids[query_index])
+                    ),
+                    oversampled_search=raw_candidates_requested[query_index] > top_k,
+                )
+            )
+        return FaissBatchSearchResult(
+            results=results,
+            batch_count=1,
+            raw_search_seconds=raw_search_seconds,
+            availability_filter_seconds=availability_filter_seconds,
+            history_exclusion_seconds=history_exclusion_seconds,
+            final_top_k_seconds=final_top_k_seconds,
+            other_filter_seconds=other_filter_seconds,
         )
 
 
@@ -284,16 +500,37 @@ def _post_filter_indices(
     *,
     article_ids: list[str],
     scores: dict[int, float],
-    eligible_news_ids: set[str],
-    history_news_ids: set[str],
+    eligible_news_ids: EligibilityLookup,
+    history_news_ids: set[str] | frozenset[str],
     availability: ArticleAvailability,
     exclude_history: bool,
 ) -> _FilteredCandidates:
+    filtered, _timing = _post_filter_indices_profiled(
+        indices,
+        article_ids=article_ids,
+        scores=scores,
+        eligible_news_ids=eligible_news_ids,
+        history_news_ids=history_news_ids,
+        availability=availability,
+        exclude_history=exclude_history,
+    )
+    return filtered
+
+
+def _post_filter_indices_profiled(
+    indices: list[int],
+    *,
+    article_ids: list[str],
+    scores: dict[int, float],
+    eligible_news_ids: EligibilityLookup,
+    history_news_ids: set[str] | frozenset[str],
+    availability: ArticleAvailability,
+    exclude_history: bool,
+) -> tuple[_FilteredCandidates, dict[str, float]]:
+    total_start = perf_counter()
     seen: set[str] = set()
-    score_by_id: dict[str, float] = {}
+    unique_candidates: list[tuple[int, str]] = []
     rejected_invalid = 0
-    rejected_history = 0
-    rejected_unavailable = 0
     rejected_duplicate = 0
     for index in indices:
         if index < 0 or index >= len(article_ids):
@@ -304,13 +541,33 @@ def _post_filter_indices(
             rejected_duplicate += 1
             continue
         seen.add(news_id)
-        if news_id not in eligible_news_ids:
-            rejected_unavailable += 1
-            continue
-        if exclude_history and news_id in history_news_ids:
-            rejected_history += 1
-            continue
-        score_by_id[news_id] = scores.get(index, 0.0)
+        unique_candidates.append((index, news_id))
+
+    availability_start = perf_counter()
+    available_candidates = [
+        (index, news_id)
+        for index, news_id in unique_candidates
+        if news_id in eligible_news_ids
+    ]
+    availability_filter_seconds = perf_counter() - availability_start
+    rejected_unavailable = len(unique_candidates) - len(available_candidates)
+
+    history_start = perf_counter()
+    if exclude_history:
+        retained_candidates = [
+            (index, news_id)
+            for index, news_id in available_candidates
+            if news_id not in history_news_ids
+        ]
+    else:
+        retained_candidates = available_candidates
+    history_exclusion_seconds = perf_counter() - history_start
+    rejected_history = len(available_candidates) - len(retained_candidates)
+
+    ranking_start = perf_counter()
+    score_by_id = {
+        news_id: scores.get(index, 0.0) for index, news_id in retained_candidates
+    }
     ranked = sorted(
         score_by_id,
         key=lambda news_id: (
@@ -319,6 +576,13 @@ def _post_filter_indices(
             news_id,
         ),
     )
+    final_top_k_seconds = perf_counter() - ranking_start
+    total_seconds = perf_counter() - total_start
+    measured_seconds = (
+        availability_filter_seconds
+        + history_exclusion_seconds
+        + final_top_k_seconds
+    )
     return _FilteredCandidates(
         news_ids=ranked,
         scores=score_by_id,
@@ -326,7 +590,12 @@ def _post_filter_indices(
         rejected_unavailable_count=rejected_unavailable,
         rejected_invalid_count=rejected_invalid,
         rejected_duplicate_count=rejected_duplicate,
-    )
+    ), {
+        "availability_filter_seconds": availability_filter_seconds,
+        "history_exclusion_seconds": history_exclusion_seconds,
+        "final_top_k_seconds": final_top_k_seconds,
+        "other_filter_seconds": max(0.0, total_seconds - measured_seconds),
+    }
 
 
 def _fingerprint_article_ids(article_ids: list[str]) -> str:
