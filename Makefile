@@ -1,4 +1,4 @@
-.PHONY: install validate-data validate-data-train-only audit-data audit-data-train-only prepare-data prepare-data-train-only evaluate-baselines evaluate-baselines-smoke evaluate-retrieval evaluate-retrieval-smoke evaluate-ann evaluate-ann-smoke test test-ann lint check
+.PHONY: install validate-data validate-data-train-only audit-data audit-data-train-only prepare-data prepare-data-train-only evaluate-baselines evaluate-baselines-smoke evaluate-retrieval evaluate-retrieval-smoke evaluate-ann evaluate-ann-smoke evaluate-ltr evaluate-ltr-smoke test test-ann lint check
 
 install:
 	python -m pip install -e ".[dev]"
@@ -61,6 +61,12 @@ evaluate-ann-smoke:
 		--seed 42 \
 		--faiss-threads 1; \
 	echo "Synthetic ANN smoke test passed; temporary metrics are not benchmark results."
+
+evaluate-ltr:
+	python -m feed_ranking_ops.ranking.run_ltr --processed-dir data/processed --reports-dir reports/ltr
+
+evaluate-ltr-smoke:
+	python -m feed_ranking_ops.ranking.run_ltr --processed-dir data/processed --reports-dir reports/ltr_smoke --limit-impressions 1000
 
 test:
 	pytest -q

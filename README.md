@@ -42,8 +42,17 @@ Milestone 4 adds dense-vector and FAISS approximate retrieval benchmarking:
 - Select SVD dimension and HNSW search parameters on validation-only ANN agreement.
 - Separate representation loss from ANN search loss in the generated reports.
 
-This scope intentionally does not implement two-tower neural models, LightGBM, APIs, Redis,
-streaming, Docker, dashboards, or monitoring.
+Milestone 5 adds supervised learning-to-rank over logged candidates:
+
+- Explode impression candidates into deterministic pointwise training rows.
+- Combine source order, prior engagement, history affinity, TF-IDF, and article metadata.
+- Compare balanced logistic regression and histogram gradient boosting.
+- Select by validation NDCG@10, refit on train plus validation, and evaluate once on the
+  internal chronological holdout.
+- Prevent same-impression and future-click leakage in popularity features.
+
+This scope intentionally does not implement neural rankers, two-tower models, LightGBM, APIs,
+Redis, streaming, Docker, dashboards, or monitoring.
 
 Expected Dataset Layout
 -----------------------
@@ -245,6 +254,25 @@ full sparse/dense/Flat/HNSW comparison remains available without `--ann-only`. Q
 are stacked and searched in FAISS batches; iterative oversampling preserves per-query
 availability and history filtering while avoiding one FAISS call per query.
 
+Train a pointwise logged-candidate ranker on a 1,000-impression-per-partition smoke slice:
+
+```bash
+python -m feed_ranking_ops.ranking.run_ltr \
+  --processed-dir data/processed \
+  --reports-dir reports/ltr_smoke \
+  --limit-impressions 1000
+make evaluate-ltr-smoke
+```
+
+Run the full logged-candidate experiment:
+
+```bash
+python -m feed_ranking_ops.ranking.run_ltr \
+  --processed-dir data/processed \
+  --reports-dir reports/ltr
+make evaluate-ltr
+```
+
 Generated Outputs
 -----------------
 
@@ -301,6 +329,16 @@ ANN retrieval writes:
 
 Fast ANN-only mode uses the same inspectable retrieval/diagnostic schemas and writes
 `validation_metrics.json` and `test_metrics.json` in place of the full comparison metric files.
+
+Learning-to-rank writes:
+
+- `reports/ltr/validation_metrics.json`
+- `reports/ltr/test_metrics.json`
+- `reports/ltr/protocol.json`
+- `reports/ltr/model_comparison.md`
+- `reports/ltr/feature_importance.md`
+- `reports/ltr/validation_predictions.parquet`
+- `reports/ltr/test_predictions.parquet`
 
 Processed data and generated reports are ignored by git by default.
 
@@ -424,6 +462,22 @@ See `docs/offline_evaluation_protocol.md` for details on chronological validatio
 impression-grouped metrics, exposure bias, and why logged-candidate evaluation differs from
 full-catalog retrieval.
 
+Learning-To-Rank
+----------------
+
+Milestone 5 treats every logged candidate as a pointwise binary classification row and ranks
+candidates within each impression by predicted click probability. Balanced logistic
+regression and histogram gradient boosting combine explainable features from the established
+baselines with history coverage and article-text metadata.
+
+Training popularity values are computed chronologically: an impression is featurized before
+its click labels update the state. Validation uses train-fitted artifacts only; final test uses
+artifacts refit on train plus validation. Configuration selection uses validation NDCG@10 and
+MRR, never internal-test metrics.
+
+See [`docs/learning_to_rank_protocol.md`](docs/learning_to_rank_protocol.md) for feature
+definitions, leakage controls, commands, and interpretation limits.
+
 Full-Catalog Retrieval
 ----------------------
 
@@ -470,4 +524,4 @@ Current Limitations
 - Logged-candidate ranking does not measure full-catalog retrieval quality.
 - Exact full-catalog retrieval is a correctness reference and may not scale without ANN.
 - Offline clicks are implicit feedback and carry exposure bias.
-- No approximate retrieval, neural embeddings, API, cache, or monitoring components are implemented yet.
+- No neural ranking, API, cache, or monitoring components are implemented yet.

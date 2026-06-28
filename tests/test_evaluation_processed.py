@@ -38,6 +38,19 @@ def test_processed_parquet_loading_and_candidate_explosion(tmp_path: Path):
     assert dataset.behaviors["train"][2].history_news_ids == ["N1", "N2"]
 
 
+def test_processed_loader_can_limit_each_behavior_partition(tmp_path: Path):
+    dataset = load_processed_dataset(
+        _prepared(tmp_path),
+        limit_impressions=1,
+    )
+
+    assert {name: len(rows) for name, rows in dataset.behaviors.items()} == {
+        "train": 1,
+        "validation": 1,
+        "test": 1,
+    }
+
+
 def test_missing_processed_file_raises(tmp_path: Path):
     processed_dir = _prepared(tmp_path)
     (processed_dir / "news.parquet").unlink()
@@ -66,4 +79,3 @@ def test_candidate_missing_news_metadata_raises(tmp_path: Path):
 
     with pytest.raises(ProcessedDataError, match="Candidates with missing news metadata"):
         load_processed_dataset(processed_dir)
-

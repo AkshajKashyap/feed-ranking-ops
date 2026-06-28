@@ -85,14 +85,21 @@ class ProcessedDataset:
     history_missing_counts: dict[str, int]
 
 
-def load_processed_dataset(processed_dir: Path) -> ProcessedDataset:
+def load_processed_dataset(
+    processed_dir: Path,
+    *,
+    limit_impressions: int | None = None,
+) -> ProcessedDataset:
     """Load and validate Milestone 1 processed artifacts."""
+    if limit_impressions is not None and limit_impressions <= 0:
+        raise ValueError("limit_impressions must be positive when provided")
     _require_processed_files(processed_dir)
     news = load_news(processed_dir / PROCESSED_FILES["news"])
     behaviors = {
         partition: load_behavior_partition(
             processed_dir / PROCESSED_FILES[partition],
             partition=partition,
+            limit_rows=limit_impressions,
         )
         for partition in ("train", "validation", "test")
     }
@@ -131,15 +138,29 @@ def load_news(path: Path) -> dict[str, NewsItem]:
     return news
 
 
-def load_behavior_partition(path: Path, *, partition: str) -> list[BehaviorImpression]:
+def load_behavior_partition(
+    path: Path,
+    *,
+    partition: str,
+    limit_rows: int | None = None,
+) -> list[BehaviorImpression]:
     if not path.is_file():
         raise FileNotFoundError(f"Missing processed behavior file: {path}")
-    table = pq.read_table(path)
-    _require_columns(path, table.column_names, BEHAVIOR_COLUMNS)
-    rows = table.to_pylist()
+    if limit_rows is not None and limit_rows <= 0:
+        raise ValueError("limit_rows must be positive when provided")
+    parquet_file = pq.ParquetFile(path)
+    _require_columns(path, parquet_file.schema_arrow.names, BEHAVIOR_COLUMNS)
+    if limit_rows is None:
+        rows = parquet_file.read().to_pylist()
+    else:
+        first_batch = next(
+            parquet_file.iter_batches(batch_size=limit_rows),
+            None,
+        )
+        rows = [] if first_batch is None else first_batch.to_pylist()
     seen_impression_ids: set[str] = set()
     behaviors: list[BehaviorImpression] = []
-    for row_index, row in enumerate(rows, start=1):
+    for row_index, row in enumerate(rows[:limit_rows], start=1):
         impression_id = row.get("impression_id")
         user_id = row.get("user_id")
         timestamp = row.get("timestamp")
