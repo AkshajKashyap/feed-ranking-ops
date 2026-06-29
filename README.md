@@ -59,8 +59,16 @@ Milestone 6 adds validation-only policy promotion and local serving:
 - Package a versioned manifest and compact article metadata artifact.
 - Serve deterministic caller-provided candidate ranking through FastAPI.
 
+Milestone 7 adds serving observability and offline policy monitoring:
+
+- Optionally append privacy-conscious JSONL telemetry for rank requests.
+- Track process-local latency, error, missing-ID, and empty-history counters.
+- Compute validation/internal-test metrics across policy behavior slices.
+- Compare training reference distributions with validation, test, and request logs.
+- Generate deterministic JSON and Markdown monitoring reports.
+
 This scope intentionally does not implement neural rankers, two-tower models, LightGBM,
-Redis, streaming, Docker, dashboards, monitoring, or online experiments.
+Redis, streaming, Docker, dashboards, hosted monitoring, or online experiments.
 
 Expected Dataset Layout
 -----------------------
@@ -300,6 +308,14 @@ make smoke-serve
 make serve
 ```
 
+Run a logged serving smoke and generate monitoring reports:
+
+```bash
+make smoke-serve-logged
+make smoke-monitor
+make monitor
+```
+
 Generated Outputs
 -----------------
 
@@ -373,6 +389,12 @@ Policy selection writes:
 - `reports/model_selection/promotion_report.md`
 - `artifacts/serving/policy_manifest.json`
 - `artifacts/serving/news_catalog.parquet`
+
+Serving observability and monitoring write:
+
+- `artifacts/logs/rank_requests.jsonl` when request logging is enabled
+- `reports/monitoring/monitoring_report.json`
+- `reports/monitoring/monitoring_report.md`
 
 Processed data and generated reports are ignored by git by default.
 
@@ -533,6 +555,27 @@ Milestone 5 did not package its full fitted preprocessing state.
 See [`docs/model_selection_and_serving.md`](docs/model_selection_and_serving.md) for the
 promotion rule, manifest contract, endpoint examples, and limitations.
 
+Monitoring And Observability
+----------------------------
+
+Set `FEED_RANKING_OPS_REQUEST_LOG` to enable one aggregate JSONL event per rank request.
+Events contain counts, latency, warnings, outcomes, and top-result category aggregates, but
+not raw history or candidate IDs. Logging remains optional and a write failure does not fail
+ranking.
+
+`GET /metrics` reports process-local request counts, latency summaries, missing-candidate
+rate, unknown-history rate, empty-history rate, and log-write errors. Counters reset on
+process restart.
+
+The offline monitoring command evaluates the exact packaged policy over validation and
+internal test, including slices by history length, candidate count, empty history, and
+top-ranked category. Training distributions provide a reference for Jensen-Shannon
+divergence and absolute rate-difference checks. These are offline diagnostics, not continuous
+production drift monitoring.
+
+See [`docs/monitoring_and_observability.md`](docs/monitoring_and_observability.md) for log
+fields, privacy caveats, endpoints, slice definitions, drift checks, and commands.
+
 Full-Catalog Retrieval
 ----------------------
 
@@ -579,4 +622,4 @@ Current Limitations
 - Logged-candidate ranking does not measure full-catalog retrieval quality.
 - Exact full-catalog retrieval is a correctness reference and may not scale without ANN.
 - Offline clicks are implicit feedback and carry exposure bias.
-- No neural ranking, cache, monitoring, or online experimentation components are implemented yet.
+- No neural ranking, cache, hosted monitoring, or online experimentation components are implemented yet.

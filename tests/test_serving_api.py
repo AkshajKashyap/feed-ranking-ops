@@ -186,6 +186,121 @@ def test_manifest_catalog_schema_mismatch_fails_closed(tmp_path: Path):
     assert "schema" in health.json()["error"].lower()
 
 
+def test_request_logging_enabled_writes_privacy_safe_schema(tmp_path: Path):
+    application = _app(tmp_path)
+    log_path = tmp_path / "logs" / "rank.jsonl"
+    application = create_app(
+        tmp_path / "serving" / "policy_manifest.json",
+        request_log_path=log_path,
+        clock=lambda: datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+        request_id_factory=lambda: "fixed-request-id",
+    )
+
+    (response,) = _requests(
+        application,
+        [
+            (
+                "POST",
+                "/rank",
+                {
+                    "history_news_ids": ["N1", "UNKNOWN_HISTORY"],
+                    "candidate_news_ids": ["N1", "UNKNOWN_CANDIDATE"],
+                },
+            )
+        ],
+    )
+    event = json.loads(log_path.read_text(encoding="utf-8"))
+
+    assert response.status_code == 200
+    assert event["timestamp"] == "2026-01-02T03:04:05Z"
+    assert event["request_id"] == "fixed-request-id"
+    assert event["selected_policy"] == "category_affinity"
+    assert event["history_id_count"] == 2
+    assert event["candidate_id_count"] == 2
+    assert event["ranked_candidate_count"] == 1
+    assert event["missing_candidate_count"] == 1
+    assert event["unknown_history_count"] == 1
+    assert event["empty_history"] is False
+    assert event["latency_ms"] >= 0
+    assert event["status"] == "success"
+    assert event["outcome"] == "ranked"
+    assert "N1" not in log_path.read_text(encoding="utf-8")
+    assert "UNKNOWN_HISTORY" not in log_path.read_text(encoding="utf-8")
+
+
+def test_request_logging_disabled_and_metrics_are_available(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.delenv("FEED_RANKING_OPS_REQUEST_LOG", raising=False)
+    application = _app(tmp_path)
+    first, second, metrics = _requests(
+        application,
+        [
+            (
+                "POST",
+                "/rank",
+                {"history_news_ids": [], "candidate_news_ids": ["N1", "N2"]},
+            ),
+            (
+                "POST",
+                "/rank",
+                {
+                    "history_news_ids": ["UNKNOWN_HISTORY"],
+                    "candidate_news_ids": ["UNKNOWN_CANDIDATE", "N1"],
+                },
+            ),
+            ("GET", "/metrics", None),
+        ],
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    payload = metrics.json()
+    assert payload["total_requests"] == 2
+    assert payload["successful_requests"] == 2
+    assert payload["failed_requests"] == 0
+    assert payload["average_latency_ms"] >= 0
+    assert payload["p50_latency_ms"] >= 0
+    assert payload["p95_latency_ms"] >= 0
+    assert payload["missing_candidate_rate"] == 0.25
+    assert payload["unknown_history_rate"] == 1.0
+    assert payload["empty_history_rate"] == 0.5
+    assert payload["request_logging_enabled"] is False
+    assert not (tmp_path / "logs").exists()
+
+
+def test_failed_rank_request_is_logged_and_counted(tmp_path: Path):
+    log_path = tmp_path / "logs" / "failed.jsonl"
+    application = create_app(
+        tmp_path / "missing-manifest.json",
+        request_log_path=log_path,
+        clock=lambda: datetime(2026, 1, 1, tzinfo=UTC),
+        request_id_factory=lambda: "failed-request",
+    )
+
+    ranking, metrics = _requests(
+        application,
+        [
+            (
+                "POST",
+                "/rank",
+                {"history_news_ids": [], "candidate_news_ids": ["N1"]},
+            ),
+            ("GET", "/metrics", None),
+        ],
+    )
+    event = json.loads(log_path.read_text(encoding="utf-8"))
+
+    assert ranking.status_code == 503
+    assert event["status"] == "failed"
+    assert event["outcome"] == "service_unavailable"
+    assert event["ranked_candidate_count"] == 0
+    assert metrics.json()["total_requests"] == 1
+    assert metrics.json()["failed_requests"] == 1
+    assert metrics.json()["successful_requests"] == 0
+
+
 def _requests(
     application: FastAPI,
     requests: list[tuple[str, str, dict | None]],

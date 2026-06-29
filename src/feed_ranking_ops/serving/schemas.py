@@ -93,3 +93,34 @@ class RankResponse(BaseModel):
     unknown_history_ids: list[str]
     metadata: dict[str, Any]
     warnings: list[str]
+
+
+class RankRequestLogEvent(BaseModel):
+    timestamp: str
+    request_id: str
+    selected_policy: str | None
+    history_id_count: int = Field(ge=0)
+    candidate_id_count: int = Field(ge=0)
+    ranked_candidate_count: int = Field(ge=0)
+    missing_candidate_count: int = Field(ge=0)
+    unknown_history_count: int = Field(ge=0)
+    empty_history: bool
+    latency_ms: float = Field(ge=0.0)
+    warnings: list[str]
+    status: Literal["success", "failed"]
+    outcome: str
+    top_ranked_category_counts: dict[str, int]
+
+
+class MetricsResponse(BaseModel):
+    total_requests: int
+    successful_requests: int
+    failed_requests: int
+    average_latency_ms: float | None
+    p50_latency_ms: float | None
+    p95_latency_ms: float | None
+    missing_candidate_rate: float
+    unknown_history_rate: float
+    empty_history_rate: float
+    request_logging_enabled: bool
+    request_log_write_errors: int

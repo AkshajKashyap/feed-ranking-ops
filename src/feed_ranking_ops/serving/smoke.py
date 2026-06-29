@@ -43,29 +43,37 @@ def main(argv: list[str] | None = None) -> int:
     if not news_ids:
         raise SystemExit("Serving smoke failed: news catalog is empty")
 
-    health, policy, ranking = asyncio.run(
+    responses = asyncio.run(
         _call_endpoints(args.manifest, news_ids)
     )
-    for name, response in (
-        ("health", health),
-        ("policy", policy),
-        ("rank", ranking),
-    ):
+    for name, response in responses.items():
         if response.status_code != 200:
             raise SystemExit(
                 f"Serving smoke failed: {name} returned {response.status_code}: "
                 f"{response.text}"
             )
-    print(f"Health: {health.json()}")
-    print(f"Policy: {policy.json()['selected_policy_name']}")
-    print(f"Ranked candidates: {len(ranking.json()['ranked_candidates'])}")
+    print(f"Health: {responses['health'].json()}")
+    print(f"Policy: {responses['policy'].json()['selected_policy_name']}")
+    print(
+        f"Normal ranked candidates: "
+        f"{len(responses['normal_rank'].json()['ranked_candidates'])}"
+    )
+    print(
+        f"Empty-history warnings: "
+        f"{len(responses['empty_history_rank'].json()['warnings'])}"
+    )
+    print(
+        f"Unknown candidates: "
+        f"{responses['unknown_candidate_rank'].json()['missing_candidate_ids']}"
+    )
+    print(f"Metrics: {responses['metrics'].json()}")
     return 0
 
 
 async def _call_endpoints(
     manifest_path: Path,
     news_ids: list[str],
-) -> tuple[httpx.Response, httpx.Response, httpx.Response]:
+) -> dict[str, httpx.Response]:
     application = create_app(manifest_path)
     transport = httpx.ASGITransport(app=application)
     async with application.router.lifespan_context(application):
@@ -73,16 +81,36 @@ async def _call_endpoints(
             transport=transport,
             base_url="http://serving-smoke",
         ) as client:
-            health = await client.get("/health")
-            policy = await client.get("/policy")
-            ranking = await client.post(
-                "/rank",
-                json={
-                    "history_news_ids": news_ids[:1],
-                    "candidate_news_ids": news_ids,
-                },
-            )
-    return health, policy, ranking
+            responses = {
+                "health": await client.get("/health"),
+                "policy": await client.get("/policy"),
+                "normal_rank": await client.post(
+                    "/rank",
+                    json={
+                        "history_news_ids": news_ids[:1],
+                        "candidate_news_ids": news_ids,
+                    },
+                ),
+                "empty_history_rank": await client.post(
+                    "/rank",
+                    json={
+                        "history_news_ids": [],
+                        "candidate_news_ids": news_ids,
+                    },
+                ),
+                "unknown_candidate_rank": await client.post(
+                    "/rank",
+                    json={
+                        "history_news_ids": news_ids[:1],
+                        "candidate_news_ids": [
+                            "UNKNOWN_SMOKE_CANDIDATE",
+                            *news_ids[:1],
+                        ],
+                    },
+                ),
+                "metrics": await client.get("/metrics"),
+            }
+    return responses
 
 
 if __name__ == "__main__":

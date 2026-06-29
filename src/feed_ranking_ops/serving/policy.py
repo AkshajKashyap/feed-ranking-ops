@@ -31,25 +31,61 @@ class ServingNewsItem:
 
 
 @dataclass(frozen=True)
+class CandidatePolicyScore:
+    original_position: int
+    news_id: str
+    score: float
+
+
+@dataclass(frozen=True)
+class PolicyScoreResult:
+    candidates: list[CandidatePolicyScore]
+    missing_candidate_ids: list[str]
+    unknown_history_ids: list[str]
+
+
+@dataclass(frozen=True)
 class PolicyRuntime:
     manifest: PolicyManifest
     news: dict[str, ServingNewsItem]
 
     def rank(self, request: RankRequest) -> RankResponse:
+        result = self.score_candidates(
+            history_news_ids=request.history_news_ids,
+            candidate_news_ids=request.candidate_news_ids,
+        )
+        return self._response(request, result=result)
+
+    def score_candidates(
+        self,
+        *,
+        history_news_ids: list[str],
+        candidate_news_ids: list[str],
+    ) -> PolicyScoreResult:
         if self.manifest.selected_policy_family == "category_affinity":
-            return self._rank_category_affinity(request)
+            return self._score_category_affinity(
+                history_news_ids,
+                candidate_news_ids,
+            )
         if self.manifest.selected_policy_family == "original_order":
-            return self._rank_original_order(request)
+            return self._score_original_order(
+                history_news_ids,
+                candidate_news_ids,
+            )
         raise PolicyLoadError(
             f"Unsupported serving policy family: "
             f"{self.manifest.selected_policy_family}"
         )
 
-    def _rank_category_affinity(self, request: RankRequest) -> RankResponse:
+    def _score_category_affinity(
+        self,
+        history_news_ids: list[str],
+        candidate_news_ids: list[str],
+    ) -> PolicyScoreResult:
         category_counts: Counter[str] = Counter()
         subcategory_counts: Counter[str] = Counter()
         unknown_history_ids: list[str] = []
-        for news_id in request.history_news_ids:
+        for news_id in history_news_ids:
             item = self.news.get(news_id)
             if item is None:
                 unknown_history_ids.append(news_id)
@@ -66,9 +102,9 @@ class PolicyRuntime:
         fallback_score = float(
             self.manifest.policy_config.get("fallback_score", 0.0)
         )
-        scored: list[tuple[int, str, float]] = []
+        scored: list[CandidatePolicyScore] = []
         missing_candidate_ids: list[str] = []
-        for position, news_id in enumerate(request.candidate_news_ids):
+        for position, news_id in enumerate(candidate_news_ids):
             item = self.news.get(news_id)
             if item is None:
                 missing_candidate_ids.append(news_id)
@@ -80,26 +116,40 @@ class PolicyRuntime:
                 )
             else:
                 score = fallback_score
-            scored.append((position, news_id, float(score)))
-        return self._response(
-            request,
-            scored=scored,
+            scored.append(
+                CandidatePolicyScore(
+                    original_position=position,
+                    news_id=news_id,
+                    score=float(score),
+                )
+            )
+        return PolicyScoreResult(
+            candidates=scored,
             missing_candidate_ids=missing_candidate_ids,
             unknown_history_ids=_ordered_unique(unknown_history_ids),
         )
 
-    def _rank_original_order(self, request: RankRequest) -> RankResponse:
-        unknown_history_ids = _ordered_unknown(request.history_news_ids, self.news)
-        scored: list[tuple[int, str, float]] = []
+    def _score_original_order(
+        self,
+        history_news_ids: list[str],
+        candidate_news_ids: list[str],
+    ) -> PolicyScoreResult:
+        unknown_history_ids = _ordered_unknown(history_news_ids, self.news)
+        scored: list[CandidatePolicyScore] = []
         missing_candidate_ids: list[str] = []
-        for position, news_id in enumerate(request.candidate_news_ids):
+        for position, news_id in enumerate(candidate_news_ids):
             if news_id not in self.news:
                 missing_candidate_ids.append(news_id)
                 continue
-            scored.append((position, news_id, -float(position)))
-        return self._response(
-            request,
-            scored=scored,
+            scored.append(
+                CandidatePolicyScore(
+                    original_position=position,
+                    news_id=news_id,
+                    score=-float(position),
+                )
+            )
+        return PolicyScoreResult(
+            candidates=scored,
             missing_candidate_ids=missing_candidate_ids,
             unknown_history_ids=unknown_history_ids,
         )
@@ -108,28 +158,32 @@ class PolicyRuntime:
         self,
         request: RankRequest,
         *,
-        scored: list[tuple[int, str, float]],
-        missing_candidate_ids: list[str],
-        unknown_history_ids: list[str],
+        result: PolicyScoreResult,
     ) -> RankResponse:
-        ordered = sorted(scored, key=lambda row: (-row[2], row[0]))
+        ordered = sorted(
+            result.candidates,
+            key=lambda candidate: (
+                -candidate.score,
+                candidate.original_position,
+            ),
+        )
         ranked = [
             RankedCandidate(
-                news_id=news_id,
-                original_position=position,
+                news_id=candidate.news_id,
+                original_position=candidate.original_position,
                 rank=rank,
-                score=score,
+                score=candidate.score,
             )
-            for rank, (position, news_id, score) in enumerate(ordered, start=1)
+            for rank, candidate in enumerate(ordered, start=1)
         ]
         warnings: list[str] = []
         if not request.history_news_ids:
             warnings.append(
                 "History is empty; candidates use fallback scores and source-order ties."
             )
-        if unknown_history_ids:
+        if result.unknown_history_ids:
             warnings.append("Unknown history IDs were excluded from the user profile.")
-        if missing_candidate_ids:
+        if result.missing_candidate_ids:
             warnings.append("Unknown candidate IDs were omitted from ranked candidates.")
         if self.manifest.internal_holdout_warning:
             warnings.append(self.manifest.internal_holdout_warning)
@@ -137,13 +191,14 @@ class PolicyRuntime:
             selected_policy=self.manifest.selected_policy_name,
             policy_family=self.manifest.selected_policy_family,
             ranked_candidates=ranked,
-            missing_candidate_ids=_ordered_unique(missing_candidate_ids),
-            unknown_history_ids=unknown_history_ids,
+            missing_candidate_ids=_ordered_unique(result.missing_candidate_ids),
+            unknown_history_ids=result.unknown_history_ids,
             metadata={
                 "requested_candidate_count": len(request.candidate_news_ids),
                 "ranked_candidate_count": len(ranked),
                 "known_history_count": (
-                    len(request.history_news_ids) - len(unknown_history_ids)
+                    len(request.history_news_ids)
+                    - len(result.unknown_history_ids)
                 ),
                 "timestamp": (
                     request.timestamp.isoformat() if request.timestamp else None

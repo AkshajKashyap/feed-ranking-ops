@@ -1,4 +1,4 @@
-.PHONY: install validate-data validate-data-train-only audit-data audit-data-train-only prepare-data prepare-data-train-only evaluate-baselines evaluate-baselines-smoke evaluate-retrieval evaluate-retrieval-smoke evaluate-ann evaluate-ann-smoke evaluate-ltr evaluate-ltr-smoke select-policy serve smoke-serve test test-ann lint check
+.PHONY: install validate-data validate-data-train-only audit-data audit-data-train-only prepare-data prepare-data-train-only evaluate-baselines evaluate-baselines-smoke evaluate-retrieval evaluate-retrieval-smoke evaluate-ann evaluate-ann-smoke evaluate-ltr evaluate-ltr-smoke select-policy serve smoke-serve smoke-serve-logged monitor smoke-monitor test test-ann lint check
 
 install:
 	python -m pip install -e ".[dev]"
@@ -76,6 +76,15 @@ serve:
 
 smoke-serve:
 	python -m feed_ranking_ops.serving.smoke --manifest artifacts/serving/policy_manifest.json
+
+smoke-serve-logged:
+	FEED_RANKING_OPS_REQUEST_LOG=artifacts/logs/rank_requests.jsonl python -m feed_ranking_ops.serving.smoke --manifest artifacts/serving/policy_manifest.json
+
+monitor:
+	python -m feed_ranking_ops.monitoring.generate_report --processed-dir data/processed --serving-artifacts-dir artifacts/serving --reports-dir reports/monitoring --request-log artifacts/logs/rank_requests.jsonl
+
+smoke-monitor:
+	python -m feed_ranking_ops.monitoring.generate_report --processed-dir data/processed --serving-artifacts-dir artifacts/serving --reports-dir reports/monitoring_smoke --request-log artifacts/logs/rank_requests.jsonl --limit-impressions 100
 
 test:
 	pytest -q
