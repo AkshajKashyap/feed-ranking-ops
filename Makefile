@@ -1,4 +1,4 @@
-.PHONY: install validate-data validate-data-train-only audit-data audit-data-train-only prepare-data prepare-data-train-only evaluate-baselines evaluate-baselines-smoke evaluate-retrieval evaluate-retrieval-smoke evaluate-ann evaluate-ann-smoke evaluate-ltr evaluate-ltr-smoke test test-ann lint check
+.PHONY: install validate-data validate-data-train-only audit-data audit-data-train-only prepare-data prepare-data-train-only evaluate-baselines evaluate-baselines-smoke evaluate-retrieval evaluate-retrieval-smoke evaluate-ann evaluate-ann-smoke evaluate-ltr evaluate-ltr-smoke select-policy serve smoke-serve test test-ann lint check
 
 install:
 	python -m pip install -e ".[dev]"
@@ -67,6 +67,15 @@ evaluate-ltr:
 
 evaluate-ltr-smoke:
 	python -m feed_ranking_ops.ranking.run_ltr --processed-dir data/processed --reports-dir reports/ltr_smoke --limit-impressions 1000
+
+select-policy:
+	python -m feed_ranking_ops.ranking.select_policy --baseline-reports-dir reports/baselines --ltr-reports-dir reports/ltr --processed-dir data/processed --reports-dir reports/model_selection --artifacts-dir artifacts/serving
+
+serve:
+	uvicorn feed_ranking_ops.serving.app:app --host 127.0.0.1 --port 8000
+
+smoke-serve:
+	python -m feed_ranking_ops.serving.smoke --manifest artifacts/serving/policy_manifest.json
 
 test:
 	pytest -q

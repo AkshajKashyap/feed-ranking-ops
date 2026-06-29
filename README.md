@@ -51,8 +51,16 @@ Milestone 5 adds supervised learning-to-rank over logged candidates:
   internal chronological holdout.
 - Prevent same-impression and future-click leakage in popularity features.
 
-This scope intentionally does not implement neural rankers, two-tower models, LightGBM, APIs,
-Redis, streaming, Docker, dashboards, or monitoring.
+Milestone 6 adds validation-only policy promotion and local serving:
+
+- Compare the strongest baseline with the validation-selected learned ranker.
+- Require a configurable minimum relative NDCG@10 improvement before adding complexity.
+- Retain category affinity when HGB does not clear the default 3% validation threshold.
+- Package a versioned manifest and compact article metadata artifact.
+- Serve deterministic caller-provided candidate ranking through FastAPI.
+
+This scope intentionally does not implement neural rankers, two-tower models, LightGBM,
+Redis, streaming, Docker, dashboards, monitoring, or online experiments.
 
 Expected Dataset Layout
 -----------------------
@@ -273,6 +281,25 @@ python -m feed_ranking_ops.ranking.run_ltr \
 make evaluate-ltr
 ```
 
+Select and package the serving policy:
+
+```bash
+python -m feed_ranking_ops.ranking.select_policy \
+  --baseline-reports-dir reports/baselines \
+  --ltr-reports-dir reports/ltr \
+  --processed-dir data/processed \
+  --reports-dir reports/model_selection \
+  --artifacts-dir artifacts/serving
+make select-policy
+```
+
+Smoke-test and run the local API:
+
+```bash
+make smoke-serve
+make serve
+```
+
 Generated Outputs
 -----------------
 
@@ -339,6 +366,13 @@ Learning-to-rank writes:
 - `reports/ltr/feature_importance.md`
 - `reports/ltr/validation_predictions.parquet`
 - `reports/ltr/test_predictions.parquet`
+
+Policy selection writes:
+
+- `reports/model_selection/promotion_report.json`
+- `reports/model_selection/promotion_report.md`
+- `artifacts/serving/policy_manifest.json`
+- `artifacts/serving/news_catalog.parquet`
 
 Processed data and generated reports are ignored by git by default.
 
@@ -478,6 +512,27 @@ MRR, never internal-test metrics.
 See [`docs/learning_to_rank_protocol.md`](docs/learning_to_rank_protocol.md) for feature
 definitions, leakage controls, commands, and interpretation limits.
 
+Model Selection And Serving
+---------------------------
+
+Promotion uses validation NDCG@10, then validation MRR and AUC. A learned policy must improve
+validation NDCG@10 by at least 3% relative to the strongest baseline by default. Internal-test
+metrics are shown only after selection and never choose the served policy.
+
+The current HGB ranker improves validation NDCG@10 by about 2.77% over category affinity,
+which is below the default threshold. Category affinity is therefore packaged as the local
+serving policy. Its slightly stronger internal-test NDCG@10 is retained as post-selection
+evidence, while HGB's Recall@10 and Hit Rate@10 improvements are also reported.
+
+FastAPI exposes `GET /health`, `GET /policy`, and `POST /rank`. The rank endpoint accepts
+history and candidate news IDs, omits unknown candidates explicitly, reports unknown history
+IDs, and uses original candidate position for deterministic ties. Startup validates the
+manifest and news-catalog schema. Learned-ranker serving is intentionally deferred because
+Milestone 5 did not package its full fitted preprocessing state.
+
+See [`docs/model_selection_and_serving.md`](docs/model_selection_and_serving.md) for the
+promotion rule, manifest contract, endpoint examples, and limitations.
+
 Full-Catalog Retrieval
 ----------------------
 
@@ -524,4 +579,4 @@ Current Limitations
 - Logged-candidate ranking does not measure full-catalog retrieval quality.
 - Exact full-catalog retrieval is a correctness reference and may not scale without ANN.
 - Offline clicks are implicit feedback and carry exposure bias.
-- No neural ranking, API, cache, or monitoring components are implemented yet.
+- No neural ranking, cache, monitoring, or online experimentation components are implemented yet.

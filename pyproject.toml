@@ -17,10 +17,13 @@ dependencies = [
 "scipy",
 "pydantic",
 "pyyaml",
+"fastapi>=0.115",
+"uvicorn>=0.34",
 ]
 
 [project.optional-dependencies]
 dev = [
+"httpx",
 "pytest",
 "ruff",
 ]
