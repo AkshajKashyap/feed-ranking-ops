@@ -18,3 +18,6 @@ reports/*
 !data/processed/.gitkeep
 !artifacts/.gitkeep
 !reports/.gitkeep
+!reports/portfolio/
+!reports/portfolio/portfolio_summary.json
+!reports/portfolio/portfolio_summary.md

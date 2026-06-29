@@ -1,0 +1,180 @@
+{
+  "ann_benchmark": {
+    "available": true,
+    "backend": "flat",
+    "dense_exact_comparison_skipped": true,
+    "faiss_search_seconds": 0.6721206149991303,
+    "internal_test_metrics": {
+      "hit_rate@10": 0.013,
+      "hit_rate@100": 0.061,
+      "hit_rate@20": 0.026,
+      "hit_rate@50": 0.044,
+      "mrr@100": 0.005943583131511192,
+      "ndcg@10": 0.005396230126236264,
+      "ndcg@100": 0.012499041235711232,
+      "ndcg@20": 0.008066194411936487,
+      "recall@10": 0.010333333333333333,
+      "recall@100": 0.04306590909090909,
+      "recall@20": 0.02033333333333333,
+      "recall@50": 0.02933257575757576
+    },
+    "mode": "ann_only",
+    "query_count": 2000,
+    "total_runtime_seconds": 41.31852648300037,
+    "validation_metrics": {
+      "hit_rate@10": 0.003,
+      "hit_rate@100": 0.02,
+      "hit_rate@20": 0.005,
+      "hit_rate@50": 0.012,
+      "mrr@100": 0.0011330547137567669,
+      "ndcg@10": 0.0012210245755533266,
+      "ndcg@100": 0.003796503063542502,
+      "ndcg@20": 0.0016885072908184111,
+      "recall@10": 0.003,
+      "recall@100": 0.016166666666666666,
+      "recall@20": 0.005,
+      "recall@50": 0.010333333333333333
+    }
+  },
+  "availability": {
+    "complete": true,
+    "missing_inputs": []
+  },
+  "data": {
+    "available": true,
+    "final_partition_type": "internal_chronological_holdout",
+    "protocol": "train_only_chronological",
+    "split_counts": {
+      "test": 23545,
+      "train": 109875,
+      "validation": 23545
+    }
+  },
+  "exact_retrieval_smoke": {
+    "available": true,
+    "internal_test_metrics": {
+      "hit_rate@10": 0.04,
+      "hit_rate@100": 0.1,
+      "hit_rate@20": 0.05,
+      "hit_rate@50": 0.07,
+      "mrr@100": 0.01642537821998092,
+      "ndcg@10": 0.019131677880085518,
+      "ndcg@100": 0.02959809132453842,
+      "ndcg@20": 0.021408380367055047,
+      "recall@10": 0.035,
+      "recall@100": 0.08833333333333333,
+      "recall@20": 0.045,
+      "recall@50": 0.065
+    },
+    "purpose": "bounded sparse exact correctness reference",
+    "query_count": 200,
+    "total_runtime_seconds": 101.18376714899932,
+    "validation_metrics": {
+      "hit_rate@10": 0.03,
+      "hit_rate@100": 0.1,
+      "hit_rate@20": 0.05,
+      "hit_rate@50": 0.08,
+      "mrr@100": 0.007803748052912961,
+      "ndcg@10": 0.006345719085013255,
+      "ndcg@100": 0.015414243384058219,
+      "ndcg@20": 0.009727909259228748,
+      "recall@10": 0.015,
+      "recall@100": 0.05416666666666667,
+      "recall@20": 0.028333333333333332,
+      "recall@50": 0.04083333333333333
+    }
+  },
+  "learning_to_rank": {
+    "available": true,
+    "internal_test_metrics": {
+      "auc": 0.5869809301158537,
+      "hit_rate@10": 0.662476109577405,
+      "hit_rate@5": 0.4595455510724145,
+      "mrr": 0.2964754492513331,
+      "ndcg@10": 0.33511296456954703,
+      "ndcg@5": 0.2695651735791586,
+      "recall@10": 0.5811852550873343,
+      "recall@5": 0.39176483866905537
+    },
+    "name": "hist_gradient_boosting_learning_rate-0.1_max_leaf_nodes-15",
+    "validation_metrics": {
+      "auc": 0.618151543241131,
+      "hit_rate@10": 0.6725844128265024,
+      "hit_rate@5": 0.49607135272881714,
+      "mrr": 0.3272783684783154,
+      "ndcg@10": 0.3650559713157312,
+      "ndcg@5": 0.3075783819084683,
+      "recall@10": 0.5983425636207543,
+      "recall@5": 0.4324956697817177
+    }
+  },
+  "limitations": [
+    "Internal-test metrics use a train-only chronological holdout, not official MIND validation.",
+    "Logged-candidate metrics inherit exposure and position bias.",
+    "Exact retrieval is a bounded correctness smoke, not a scalable production path.",
+    "ANN-only runs without dense exact comparison do not report approximation recall.",
+    "Category affinity produces frequent score ties and uses source position as tie-breaker.",
+    "Serving telemetry and drift checks are local/offline diagnostics."
+  ],
+  "logged_candidate_baseline": {
+    "available": true,
+    "internal_test_metrics": {
+      "auc": 0.5858359190368744,
+      "hit_rate@10": 0.6528349968146103,
+      "hit_rate@5": 0.46285835633892547,
+      "mrr": 0.30079494336812285,
+      "ndcg@10": 0.33774822594802306,
+      "ndcg@5": 0.2758282692743707,
+      "recall@10": 0.575181800020176,
+      "recall@5": 0.3961458017075844
+    },
+    "name": "category_affinity",
+    "validation_metrics": {
+      "auc": 0.5928770306047638,
+      "hit_rate@10": 0.6603525164578466,
+      "hit_rate@5": 0.49088978551709495,
+      "mrr": 0.31786553806438433,
+      "ndcg@10": 0.3552247453346186,
+      "ndcg@5": 0.29986726560644666,
+      "recall@10": 0.5878731234787722,
+      "recall@5": 0.428387274154316
+    }
+  },
+  "monitoring": {
+    "available": true,
+    "internal_test_ndcg_at_10": 0.33774822594802306,
+    "internal_test_tie_fraction": 0.9409641112762794,
+    "request_count": 3,
+    "validation_ndcg_at_10": 0.3552247453346186,
+    "validation_tie_fraction": 0.9284349118708856
+  },
+  "project": {
+    "dataset": "Microsoft MIND-small",
+    "name": "feed-ranking-ops",
+    "version": "0.1.0"
+  },
+  "promotion": {
+    "available": true,
+    "decision": "promote_baseline_policy",
+    "learned_result": "rejected_insufficient_improvement",
+    "observed_relative_improvement": 0.02767607299387786,
+    "selected_policy": "category_affinity",
+    "threshold_relative": 0.03
+  },
+  "recommended_next_work": [
+    "Evaluate the protocol on an additional public temporal recommendation dataset.",
+    "Package a future learned ranker only with complete fitted preprocessing state.",
+    "Add hosted deployment only when a real operating environment exists."
+  ],
+  "serving": {
+    "available": true,
+    "endpoints": [
+      "/health",
+      "/policy",
+      "/rank",
+      "/metrics"
+    ],
+    "request_logging": "Optional aggregate JSONL; raw history and candidate IDs are not logged.",
+    "selected_policy": "category_affinity"
+  }
+}

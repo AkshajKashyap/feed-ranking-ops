@@ -2,7 +2,86 @@ FeedRank Ops
 ============
 
 A two-stage personalized news-feed recommendation system covering temporal data
-preparation, candidate retrieval, ranking, serving, feedback simulation, and monitoring.
+preparation, candidate retrieval, ranking, serving, and monitoring.
+
+Portfolio Overview
+------------------
+
+FeedRank Ops is an end-to-end, leakage-aware recommendation project built on Microsoft
+MIND-small. It demonstrates the engineering work around ranking models: deterministic
+temporal data preparation, exact and approximate retrieval, supervised re-ranking,
+validation-only promotion, local FastAPI inference, and auditable offline monitoring.
+
+The project deliberately serves the simpler `category_affinity` policy. A pointwise
+histogram-gradient-boosting ranker improved validation NDCG@10 by 2.77%, but did not clear the
+predeclared 3% complexity threshold and was slightly weaker on the internal chronological
+holdout. That negative promotion decision is part of the result.
+
+> **Evaluation scope:** all internal-test metrics below come from a train-only chronological
+> holdout of MIND-small train. They are not official MIND validation or test results.
+
+### Results At A Glance
+
+| Component | Real-data result |
+| --- | --- |
+| Best logged-candidate baseline | Category affinity: validation NDCG@10 `0.3552`, internal-test `0.3377` |
+| Pointwise HGB LTR | Validation NDCG@10 `0.3651`, internal-test `0.3351`; not promoted |
+| Selected serving policy | `category_affinity`, selected without using internal-test metrics |
+| Exact sparse retrieval smoke | 100 validation + 100 test queries in `101.18 s` protocol time |
+| Batched FAISS Flat ANN | 1,000 validation + 1,000 test queries in `41.32 s`; FAISS search `0.67 s` |
+| Monitoring | 100% category/subcategory coverage on holdouts; low train-to-holdout JS divergence |
+| Known limitation | Category-affinity score ties on `92.84%` validation and `94.10%` test impressions |
+
+### System Components
+
+- **Data:** strict MIND parsing, audits, and chronological official or train-only protocols.
+- **Retrieval:** sparse exact TF-IDF correctness path and batched FAISS dense ANN.
+- **Ranking:** five explainable baselines plus pointwise logistic-regression/HGB LTR.
+- **Promotion:** validation NDCG@10 threshold with deterministic MRR/AUC tie-breakers.
+- **Serving:** FastAPI `/health`, `/policy`, `/rank`, and `/metrics`.
+- **Monitoring:** privacy-conscious JSONL telemetry, policy slices, and drift-style checks.
+
+### Two-Minute Demo
+
+With prepared data and existing evaluation reports:
+
+```bash
+python -m pip install -e ".[dev,ann]"
+bash scripts/generate_demo.sh
+```
+
+The demo refreshes policy selection, runs an in-process serving smoke, and writes
+`reports/portfolio/portfolio_summary.md`. It does not rerun expensive LTR or retrieval jobs.
+
+Run the lightweight repository checks:
+
+```bash
+make check
+```
+
+Inspect release metadata:
+
+```bash
+feed-ranking-ops --version
+feed-ranking-ops project-info
+```
+
+### Technical Documentation
+
+- [Architecture](docs/architecture.md)
+- [Model and system card](docs/model_card.md)
+- [Experimental methodology](docs/experimental_methodology.md)
+- [Model selection and serving](docs/model_selection_and_serving.md)
+- [Monitoring and observability](docs/monitoring_and_observability.md)
+- [Release checklist](docs/release_checklist.md)
+- [Tracked portfolio summary](reports/portfolio/portfolio_summary.md)
+
+### Headline Limitations
+
+The data is small, implicit clicks carry exposure bias, exact retrieval is expensive, the
+ANN smoke does not compute dense-reference approximation recall, category affinity has many
+ties, and local telemetry is not continuous production monitoring. The service ranks only
+caller-provided candidates and is not a hosted or authenticated deployment.
 
 Current Scope
 -------------

@@ -1,4 +1,4 @@
-.PHONY: install validate-data validate-data-train-only audit-data audit-data-train-only prepare-data prepare-data-train-only evaluate-baselines evaluate-baselines-smoke evaluate-retrieval evaluate-retrieval-smoke evaluate-ann evaluate-ann-smoke evaluate-ltr evaluate-ltr-smoke select-policy serve smoke-serve smoke-serve-logged monitor smoke-monitor test test-ann lint check
+.PHONY: install validate-data validate-data-train-only audit-data audit-data-train-only prepare-data prepare-data-train-only evaluate-baselines evaluate-baselines-smoke evaluate-retrieval evaluate-retrieval-smoke evaluate-ann evaluate-ann-smoke evaluate-ltr evaluate-ltr-smoke select-policy serve smoke-serve smoke-serve-logged monitor smoke-monitor portfolio demo project-info release-check test test-ann lint check
 
 install:
 	python -m pip install -e ".[dev]"
@@ -85,6 +85,18 @@ monitor:
 
 smoke-monitor:
 	python -m feed_ranking_ops.monitoring.generate_report --processed-dir data/processed --serving-artifacts-dir artifacts/serving --reports-dir reports/monitoring_smoke --request-log artifacts/logs/rank_requests.jsonl --limit-impressions 100
+
+portfolio:
+	python -m feed_ranking_ops.portfolio.generate_report --reports-dir reports --artifacts-dir artifacts --output-dir reports/portfolio
+
+demo:
+	bash scripts/generate_demo.sh
+
+project-info:
+	python -m feed_ranking_ops.cli project-info
+
+release-check:
+	bash scripts/release_check.sh
 
 test:
 	pytest -q
